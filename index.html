@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Компас — гид по городам</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#16333A;
+    --ink-deep:#0E2228;
+    --paper:#E9E4D6;
+    --paper-light:#F4F1E7;
+    --brass:#B8843A;
+    --brass-light:#D9AE6E;
+    --green:#5B7A63;
+    --red:#A9503F;
+    --line:#c9c2ac;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--ink-deep);
+    font-family:'Inter',sans-serif;
+    color:var(--ink);
+    min-height:100vh;
+    display:flex;
+    justify-content:center;
+  }
+  #app{
+    width:100%;
+    max-width:480px;
+    min-height:100vh;
+    background:var(--paper);
+    position:relative;
+    overflow-x:hidden;
+    box-shadow:0 0 60px rgba(0,0,0,0.5);
+    padding-bottom:30px;
+  }
+
+  /* ---------- HEADER ---------- */
+  header{
+    background:var(--ink);
+    color:var(--paper-light);
+    padding:22px 20px 26px;
+    position:relative;
+    border-bottom:3px solid var(--brass);
+  }
+  header .eyebrow{
+    font-family:'JetBrains Mono',monospace;
+    font-size:11px;
+    letter-spacing:0.18em;
+    text-transform:uppercase;
+    color:var(--brass-light);
+    display:flex;
+    align-items:center;
+    gap:8px;
+  }
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--brass-light);box-shadow:0 0 6px var(--brass-light);flex-shrink:0;}
+  .dot.live{background:#7FC79E;box-shadow:0 0 6px #7FC79E;animation:pulse 1.6s infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+  header h1{
+    font-family:'Fraunces',serif;
+    font-weight:600;
+    font-size:30px;
+    margin:6px 0 0;
+    letter-spacing:0.01em;
+  }
+  header .sub{
+    font-size:13px;
+    color:#B9C7C4;
+    margin-top:4px;
+  }
+
+  .search-wrap{position:relative;margin-top:16px;}
+  .locate-row{display:flex;gap:8px;}
+  input#citySearch{
+    flex:1;
+    background:var(--paper-light);
+    border:none;
+    border-radius:3px;
+    padding:11px 12px;
+    font-family:'Inter',sans-serif;
+    font-size:14px;
+    font-weight:600;
+    color:var(--ink);
+    min-width:0;
+  }
+  input#citySearch::placeholder{color:#9a9478;font-weight:500;}
+  button#geoBtn{
+    background:var(--brass);
+    border:none;
+    border-radius:3px;
+    color:var(--ink-deep);
+    font-weight:700;
+    font-size:13px;
+    padding:0 14px;
+    cursor:pointer;
+    display:flex;
+    align-items:center;
+    gap:6px;
+    white-space:nowrap;
+    flex-shrink:0;
+  }
+  button#geoBtn:active{transform:translateY(1px);}
+  button#geoBtn[disabled]{opacity:.6;}
+
+  #suggestions{
+    position:absolute;
+    top:calc(100% + 4px);
+    left:0; right:66px;
+    background:var(--paper-light);
+    border-radius:4px;
+    overflow:hidden;
+    box-shadow:0 8px 20px rgba(0,0,0,0.3);
+    z-index:20;
+    display:none;
+  }
+  #suggestions.show{display:block;}
+  #suggestions .sugg-item{
+    padding:10px 12px;
+    font-size:13px;
+    color:var(--ink);
+    cursor:pointer;
+    border-bottom:1px solid #e3ddc9;
+  }
+  #suggestions .sugg-item:last-child{border-bottom:none;}
+  #suggestions .sugg-item:hover, #suggestions .sugg-item.sel{background:#e6e0cc;}
+  #suggestions .sugg-item small{display:block;color:#8a8368;font-size:11px;margin-top:1px;}
+
+  #geoStatus{
+    font-family:'JetBrains Mono',monospace;
+    font-size:11px;
+    color:var(--brass-light);
+    margin-top:8px;
+    min-height:14px;
+  }
+  #geoStatus.err{color:#E39C8C;}
+
+  /* ---------- TABS ---------- */
+  .tabs{
+    display:flex;
+    gap:0;
+    padding:16px 20px 0;
+    border-bottom:1px dashed var(--line);
+  }
+  .tab{
+    flex:1;
+    text-align:center;
+    padding:10px 4px 12px;
+    font-size:13px;
+    font-weight:600;
+    color:#8a8368;
+    cursor:pointer;
+    border-bottom:3px solid transparent;
+    transition:all .15s ease;
+  }
+  .tab.active{color:var(--ink); border-bottom-color:var(--brass);}
+  .tab .count{
+    font-family:'JetBrains Mono',monospace;
+    font-size:10px;
+    opacity:.75;
+  }
+
+  .radius-note{
+    padding:10px 20px 0;
+    font-family:'JetBrains Mono',monospace;
+    font-size:10.5px;
+    color:#8a8368;
+    display:flex;
+    justify-content:space-between;
+  }
+
+  /* ---------- LIST ---------- */
+  #list{
+    padding:14px 20px 40px;
+    display:flex;
+    flex-direction:column;
+    gap:14px;
+    min-height:120px;
+  }
+  .empty-msg, .error-msg{
+    font-family:'JetBrains Mono',monospace;
+    font-size:12.5px;
+    color:#8a8368;
+    text-align:center;
+    padding:30px 10px;
+    line-height:1.7;
+  }
+  .error-msg{color:var(--red);}
+  .retry-btn{
+    margin-top:10px;
+    background:var(--ink);
+    color:var(--paper-light);
+    border:none;
+    border-radius:3px;
+    padding:8px 16px;
+    font-family:'Inter',sans-serif;
+    font-size:12px;
+    font-weight:600;
+    cursor:pointer;
+  }
+
+  /* skeleton loading */
+  .skeleton-card{
+    height:82px;
+    border-radius:6px;
+    background:linear-gradient(90deg, #ece7d9 25%, #f4f1e7 37%, #ece7d9 63%);
+    background-size:400% 100%;
+    animation:shimmer 1.4s ease infinite;
+  }
+  @keyframes shimmer{0%{background-position:100% 0;}100%{background-position:0 0;}}
+
+  /* boarding-pass style card */
+  .poi-card{
+    background:var(--paper-light);
+    border-radius:6px;
+    display:flex;
+    position:relative;
+    box-shadow:0 2px 6px rgba(20,30,25,0.12);
+    cursor:pointer;
+    overflow:hidden;
+    animation:cardIn .25s ease both;
+  }
+  @keyframes cardIn{from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:translateY(0);}}
+  .poi-card:active{transform:scale(0.99);}
+  .poi-main{flex:1; padding:14px 14px 14px 16px; min-width:0;}
+  .poi-cat{
+    font-family:'JetBrains Mono',monospace;
+    font-size:10px;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    color:var(--green);
+    font-weight:700;
+  }
+  .poi-name{
+    font-family:'Fraunces',serif;
+    font-size:18px;
+    font-weight:600;
+    margin:3px 0 4px;
+    color:var(--ink);
+    line-height:1.2;
+  }
+  .poi-desc{
+    font-size:12.5px;
+    color:#5f5a48;
+    line-height:1.4;
+    display:-webkit-box;
+    -webkit-line-clamp:2;
+    -webkit-box-orient:vertical;
+    overflow:hidden;
+  }
+  .poi-stub{
+    width:84px;
+    flex-shrink:0;
+    border-left:2px dashed var(--line);
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    background:repeating-linear-gradient(135deg, #ece7d9, #ece7d9 6px, #e6e0cf 6px, #e6e0cf 12px);
+    position:relative;
+  }
+  .poi-stub .dist-num{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:17px; color:var(--ink);}
+  .poi-stub .dist-unit{font-family:'JetBrains Mono',monospace; font-size:9px; color:#8a8368; letter-spacing:0.05em;}
+  .poi-stub::before,.poi-stub::after{
+    content:""; position:absolute; width:12px;height:12px;
+    background:var(--paper); border-radius:50%; left:-7px;
+  }
+  .poi-stub::before{top:-6px;}
+  .poi-stub::after{bottom:-6px;}
+
+  /* ---------- DETAIL OVERLAY ---------- */
+  #detail{
+    position:fixed; inset:0; max-width:480px; margin:0 auto;
+    background:var(--paper-light);
+    transform:translateY(100%);
+    transition:transform .32s cubic-bezier(.4,0,.2,1);
+    z-index:50; overflow-y:auto;
+  }
+  #detail.open{transform:translateY(0);}
+  #detail .photo-wrap{
+    position:relative; height:260px; background:var(--ink);
+    display:flex; align-items:center; justify-content:center;
+  }
+  #detail .photo-wrap img{width:100%;height:100%;object-fit:cover;display:block; position:absolute; inset:0;}
+  #detail .photo-wrap img.hidden{display:none;}
+  .compass-spin{
+    width:38px;height:38px;
+    border:2.5px solid rgba(217,174,110,0.3);
+    border-top-color: var(--brass-light);
+    border-radius:50%;
+    animation:spin .9s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+  #detail .closeBtn{
+    position:absolute; top:16px; left:16px; width:34px; height:34px;
+    border-radius:50%; background:rgba(14,34,40,0.65); color:#fff;
+    border:none; font-size:18px; cursor:pointer; z-index:2;
+    display:flex; align-items:center; justify-content:center;
+  }
+  #detail .stamp{
+    position:absolute; bottom:14px; right:14px; z-index:2;
+    background:var(--brass); color:var(--ink-deep);
+    font-family:'JetBrains Mono',monospace; font-weight:700; font-size:13px;
+    padding:6px 12px; border-radius:3px; transform:rotate(-3deg);
+    box-shadow:0 2px 6px rgba(0,0,0,0.25);
+  }
+  #detail .content{padding:22px 22px 60px;}
+  #detail .cat{
+    font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:0.1em;
+    text-transform:uppercase; color:var(--green); font-weight:700;
+  }
+  #detail h2{font-family:'Fraunces',serif; font-size:26px; font-weight:600; margin:6px 0 10px;}
+  #detail .addr{font-size:13px; color:#6b6552; margin-bottom:16px; display:flex; gap:6px;}
+  #detail p.desc{font-size:14.5px; line-height:1.65; color:#3a3729; white-space:pre-line;}
+  #detail .src-note{
+    margin-top:22px; padding-top:14px; border-top:1px dashed var(--line);
+    font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#9a9478;
+  }
+  #detail .src-note a{color:var(--green);}
+
+  /* ---------- FOOTER NOTE ---------- */
+  .foot-note{
+    padding:14px 20px 4px;
+    color:#8a8368;
+    font-family:'JetBrains Mono',monospace;
+    font-size:10px;
+    text-align:center;
+    letter-spacing:0.02em;
+    line-height:1.6;
+  }
+  .foot-note a{color:var(--green);}
+</style>
+</head>
+<body>
+
+<div id="app">
+  <header>
+    <div class="eyebrow"><span class="dot" id="liveDot"></span> Полевой гид · живые данные</div>
+    <h1>Компас</h1>
+    <div class="sub" id="cityLabel">Москва</div>
+
+    <div class="search-wrap">
+      <div class="locate-row">
+        <input id="citySearch" type="text" placeholder="Город, например: Тбилиси" autocomplete="off">
+        <button id="geoBtn">📍 Моя точка</button>
+      </div>
+      <div id="suggestions"></div>
+    </div>
+    <div id="geoStatus"></div>
+  </header>
+
+  <div class="tabs">
+    <div class="tab active" data-cat="attraction">Места <span class="count" id="cnt-attraction"></span></div>
+    <div class="tab" data-cat="food">Еда <span class="count" id="cnt-food"></span></div>
+    <div class="tab" data-cat="shop">Магазины <span class="count" id="cnt-shop"></span></div>
+  </div>
+  <div class="radius-note">
+    <span id="radiusText">радиус поиска: 3 км</span>
+    <span id="resultMeta"></span>
+  </div>
+
+  <div id="list"></div>
+
+  <div class="foot-note">
+    Места — <a href="https://www.openstreetmap.org/copyright" target="_blank">© участники OpenStreetMap</a><br>
+    Фото и описания — <a href="https://ru.wikipedia.org" target="_blank">Wikipedia</a> · геопоиск — Nominatim
+  </div>
+</div>
+
+<div id="detail">
+  <div class="photo-wrap" id="photoWrap">
+    <button class="closeBtn" id="closeDetail">✕</button>
+    <div class="compass-spin" id="detailSpinner"></div>
+    <img id="detailImg" class="hidden" src="" alt="">
+    <div class="stamp" id="detailStamp">0.0 км</div>
+  </div>
+  <div class="content">
+    <div class="cat" id="detailCat"></div>
+    <h2 id="detailName"></h2>
+    <div class="addr">📍 <span id="detailAddr"></span></div>
+    <p class="desc" id="detailDesc">Загружаем описание…</p>
+    <div class="src-note" id="detailSrc"></div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   ЖИВЫЕ ИСТОЧНИКИ ДАННЫХ (без API-ключей):
+   - Overpass API (OpenStreetMap)  → список мест по координатам
+   - Nominatim (OpenStreetMap)     → поиск города / обратное геокодирование
+   - Wikipedia REST API            → фото + описание конкретного места
+   Для продакшена: свой Overpass-инстанс / кэш, соблюдение лимитов
+   Nominatim (макс. 1 запрос/сек), и подпись источников (см. футер).
+   ============================================================ */
+
+const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
+const NOMINATIM_URL = "https://nominatim.openstreetmap.org";
+const RADIUS = {attraction:3500, food:2000, shop:2000};
+const CAT_LABEL = {attraction:"Достопримечательность", food:"Еда", shop:"Магазин"};
+
+let currentLocation = {lat:55.7558, lng:37.6173};
+let currentCityName = "Москва";
+let activeCat = "attraction";
+let rawData = {attraction:[], food:[], shop:[]};
+let loadState = "idle"; // idle | loading | done | error
+let searchDebounce = null;
+let wikiCache = {};
+
+const listEl = document.getElementById('list');
+const geoStatus = document.getElementById('geoStatus');
+const cityLabel = document.getElementById('cityLabel');
+const citySearch = document.getElementById('citySearch');
+const suggestionsEl = document.getElementById('suggestions');
+
+function distanceKm(a,b){
+  const R=6371;
+  const dLat=(b.lat-a.lat)*Math.PI/180;
+  const dLng=(b.lng-a.lng)*Math.PI/180;
+  const s=Math.sin(dLat/2)**2 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R*2*Math.atan2(Math.sqrt(s), Math.sqrt(1-s));
+}
+
+/* ---------------- OVERPASS: подтягиваем реальные точки ---------------- */
+function buildOverpassQuery(lat, lon){
+  return `[out:json][timeout:25];(
+    node["tourism"~"attraction|museum|viewpoint|gallery|artwork|zoo|theme_park"](around:${RADIUS.attraction},${lat},${lon});
+    node["historic"](around:${RADIUS.attraction},${lat},${lon});
+    node["amenity"~"restaurant|cafe|fast_food|bar|pub|food_court"](around:${RADIUS.food},${lat},${lon});
+    node["shop"](around:${RADIUS.shop},${lat},${lon});
+  );out body 80;`;
+}
+
+function classify(tags){
+  if(tags.tourism || tags.historic) return "attraction";
+  if(tags.amenity) return "food";
+  if(tags.shop) return "shop";
+  return null;
+}
+
+async function loadPOIs(loc, label){
+  currentLocation = loc;
+  currentCityName = label;
+  cityLabel.textContent = label;
+  loadState = "loading";
+  rawData = {attraction:[], food:[], shop:[]};
+  updateCounts();
+  render();
+
+  try{
+    const ctrl = new AbortController();
+    const timeout = setTimeout(()=>ctrl.abort(), 20000);
+    const resp = await fetch(OVERPASS_URL, {
+      method:"POST",
+      body:"data=" + encodeURIComponent(buildOverpassQuery(loc.lat, loc.lng)),
+      signal: ctrl.signal
+    });
+    clearTimeout(timeout);
+    if(!resp.ok) throw new Error("Overpass вернул ошибку " + resp.status);
+    const data = await resp.json();
+
+    (data.elements||[]).forEach(el=>{
+      const tags = el.tags||{};
+      if(!tags.name) return; // пропускаем безымянные объекты
+      const cat = classify(tags);
+      if(!cat) return;
+      const p = {
+        id: el.id,
+        cat,
+        name: tags.name,
+        lat: el.lat, lng: el.lon,
+        tags,
+        addr: [tags["addr:street"], tags["addr:housenumber"]].filter(Boolean).join(", ") || "Адрес уточняется",
+      };
+      p.dist = distanceKm(loc, p);
+      rawData[cat].push(p);
+    });
+    Object.keys(rawData).forEach(c=>{
+      rawData[c].sort((a,b)=>a.dist-b.dist);
+      rawData[c] = rawData[c].slice(0,20);
+    });
+    loadState = "done";
+  }catch(e){
+    console.error(e);
+    loadState = "error";
+  }
+  updateCounts();
+  render();
+}
+
+/* ---------------- NOMINATIM: поиск города ---------------- */
+citySearch.addEventListener('input', ()=>{
+  clearTimeout(searchDebounce);
+  const q = citySearch.value.trim();
+  if(q.length < 3){ suggestionsEl.classList.remove('show'); return; }
+  searchDebounce = setTimeout(()=>searchCity(q), 400);
+});
+citySearch.addEventListener('focus', ()=>{ if(suggestionsEl.innerHTML) suggestionsEl.classList.add('show'); });
+document.addEventListener('click', (e)=>{
+  if(!e.target.closest('.search-wrap')) suggestionsEl.classList.remove('show');
+});
+
+async function searchCity(q){
+  try{
+    const url = `${NOMINATIM_URL}/search?format=json&q=${encodeURIComponent(q)}&limit=5&accept-language=ru`;
+    const resp = await fetch(url, {headers:{"Accept":"application/json"}});
+    const results = await resp.json();
+    if(!results.length){
+      suggestionsEl.innerHTML = `<div class="sugg-item">Ничего не найдено</div>`;
+      suggestionsEl.classList.add('show');
+      return;
+    }
+    suggestionsEl.innerHTML = results.map(r=>`
+      <div class="sugg-item" data-lat="${r.lat}" data-lon="${r.lon}" data-name="${r.display_name.split(',')[0]}">
+        ${r.display_name.split(',')[0]}
+        <small>${r.display_name}</small>
+      </div>`).join('');
+    suggestionsEl.classList.add('show');
+    suggestionsEl.querySelectorAll('.sugg-item[data-lat]').forEach(item=>{
+      item.addEventListener('click', ()=>{
+        const loc = {lat:parseFloat(item.dataset.lat), lng:parseFloat(item.dataset.lon)};
+        citySearch.value = item.dataset.name;
+        suggestionsEl.classList.remove('show');
+        geoStatus.textContent = "";
+        geoStatus.classList.remove('err');
+        loadPOIs(loc, item.dataset.name);
+      });
+    });
+  }catch(e){
+    suggestionsEl.innerHTML = `<div class="sugg-item">Ошибка поиска. Проверьте соединение.</div>`;
+    suggestionsEl.classList.add('show');
+  }
+}
+
+/* ---------------- ГЕОЛОКАЦИЯ ---------------- */
+document.getElementById('geoBtn').addEventListener('click', ()=>{
+  if(!navigator.geolocation){
+    geoStatus.textContent = "Геолокация недоступна в этом браузере";
+    geoStatus.classList.add('err');
+    return;
+  }
+  const btn = document.getElementById('geoBtn');
+  btn.disabled = true;
+  geoStatus.classList.remove('err');
+  geoStatus.textContent = "Определяем координаты…";
+  navigator.geolocation.getCurrentPosition(async pos=>{
+    const loc = {lat:pos.coords.latitude, lng:pos.coords.longitude};
+    geoStatus.textContent = "Координаты получены, ищем город…";
+    let label = "Моё местоположение";
+    try{
+      const url = `${NOMINATIM_URL}/reverse?format=json&lat=${loc.lat}&lon=${loc.lng}&accept-language=ru`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      label = data.address?.city || data.address?.town || data.address?.village || data.display_name?.split(',')[0] || label;
+    }catch(e){ /* используем запасной label */ }
+    citySearch.value = label;
+    geoStatus.textContent = `📍 ${label} · точность ${Math.round(pos.coords.accuracy)} м`;
+    btn.disabled = false;
+    loadPOIs(loc, label);
+  }, err=>{
+    geoStatus.textContent = "Не удалось получить координаты: " + err.message;
+    geoStatus.classList.add('err');
+    btn.disabled = false;
+  }, {enableHighAccuracy:true, timeout:10000});
+});
+
+/* ---------------- ТАБЫ ---------------- */
+document.querySelectorAll('.tab').forEach(tab=>{
+  tab.addEventListener('click', ()=>{
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    tab.classList.add('active');
+    activeCat = tab.dataset.cat;
+    document.getElementById('radiusText').textContent = `радиус поиска: ${(RADIUS[activeCat]/1000).toFixed(1)} км`;
+    render();
+  });
+});
+
+function updateCounts(){
+  ['attraction','food','shop'].forEach(c=>{
+    document.getElementById('cnt-'+c).textContent = loadState==='done' ? rawData[c].length : '';
+  });
+}
+
+/* ---------------- РЕНДЕР СПИСКА ---------------- */
+function render(){
+  const dot = document.getElementById('liveDot');
+  dot.classList.toggle('live', loadState==='done');
+
+  if(loadState === "loading"){
+    listEl.innerHTML = Array(4).fill('<div class="skeleton-card"></div>').join('');
+    document.getElementById('resultMeta').textContent = "загрузка…";
+    return;
+  }
+  if(loadState === "error"){
+    listEl.innerHTML = `<div class="error-msg">Не удалось загрузить данные о городе «${currentCityName}».<br>Проверьте соединение или попробуйте другой город.<br>
+      <button class="retry-btn" id="retryBtn">Повторить</button></div>`;
+    document.getElementById('retryBtn').addEventListener('click', ()=>loadPOIs(currentLocation, currentCityName));
+    document.getElementById('resultMeta').textContent = "";
+    return;
+  }
+
+  const items = rawData[activeCat] || [];
+  document.getElementById('resultMeta').textContent = items.length ? `найдено: ${items.length}` : "";
+
+  if(items.length===0){
+    listEl.innerHTML = `<div class="empty-msg">В радиусе ${(RADIUS[activeCat]/1000).toFixed(1)} км от «${currentCityName}» открытые карты OpenStreetMap не содержат размеченных мест этой категории.<br>Попробуйте другой город или категорию.</div>`;
+    return;
+  }
+
+  listEl.innerHTML = "";
+  items.forEach(p=>{
+    const card = document.createElement('div');
+    card.className = 'poi-card';
+    const dText = p.dist < 1 ? Math.round(p.dist*1000) : p.dist.toFixed(1);
+    const dUnit = p.dist < 1 ? "м" : "км";
+    const shortDesc = p.tags.description || subtypeLabel(p) || "Нажмите, чтобы узнать подробнее";
+    card.innerHTML = `
+      <div class="poi-main">
+        <div class="poi-cat">${CAT_LABEL[p.cat]}</div>
+        <div class="poi-name">${escapeHtml(p.name)}</div>
+        <div class="poi-desc">${escapeHtml(shortDesc)}</div>
+      </div>
+      <div class="poi-stub">
+        <div class="dist-num">${dText}</div>
+        <div class="dist-unit">${dUnit}</div>
+      </div>
+    `;
+    card.addEventListener('click', ()=>openDetail(p));
+    listEl.appendChild(card);
+  });
+}
+
+function subtypeLabel(p){
+  const t = p.tags;
+  return t.tourism || t.historic || t.amenity || t.shop || "";
+}
+function escapeHtml(s){
+  const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+}
+
+/* ---------------- ДЕТАЛЬНАЯ КАРТОЧКА + WIKIPEDIA ---------------- */
+async function openDetail(p){
+  document.getElementById('detailCat').textContent = CAT_LABEL[p.cat];
+  document.getElementById('detailName').textContent = p.name;
+  document.getElementById('detailAddr').textContent = p.addr;
+  const dText = p.dist < 1 ? `${Math.round(p.dist*1000)} м` : `${p.dist.toFixed(1)} км`;
+  document.getElementById('detailStamp').textContent = dText;
+  document.getElementById('detailDesc').textContent = "Загружаем описание из Wikipedia…";
+  document.getElementById('detailSrc').textContent = "";
+  const img = document.getElementById('detailImg');
+  img.classList.add('hidden');
+  document.getElementById('detailSpinner').style.display = 'block';
+  document.getElementById('detail').classList.add('open');
+
+  const info = await getWikiInfo(p);
+  document.getElementById('detailSpinner').style.display = 'none';
+  if(info.image){
+    img.src = info.image;
+    img.classList.remove('hidden');
+  }
+  document.getElementById('detailDesc').textContent = info.extract || fallbackDescription(p);
+  document.getElementById('detailSrc').innerHTML = info.url
+    ? `Источник: <a href="${info.url}" target="_blank">Wikipedia</a>`
+    : `Описание сгенерировано из данных OpenStreetMap — статья в Wikipedia не найдена.`;
+}
+
+function fallbackDescription(p){
+  const t = p.tags;
+  const kind = t.tourism || t.historic || t.amenity || t.shop;
+  return `Отдельной статьи об этом месте пока нет в Wikipedia. По данным OpenStreetMap это объект типа «${kind}»${t.cuisine ? `, кухня: ${t.cuisine}` : ""}. Расстояние и адрес — из открытых карт.`;
+}
+
+async function getWikiInfo(p){
+  const cacheKey = p.id;
+  if(wikiCache[cacheKey]) return wikiCache[cacheKey];
+
+  let lang = "ru", title = p.name;
+  if(p.tags.wikipedia){
+    const parts = p.tags.wikipedia.split(':');
+    if(parts.length===2){ lang = parts[0]; title = parts[1]; }
+  }
+
+  try{
+    let result = await fetchSummary(lang, title);
+    if(!result){
+      // ищем ближайшую подходящую статью по названию
+      const found = await searchWikiTitle(lang, p.name);
+      if(found) result = await fetchSummary(lang, found);
+    }
+    if(!result && lang !== "en"){
+      const foundEn = await searchWikiTitle("en", p.name);
+      if(foundEn) result = await fetchSummary("en", foundEn);
+    }
+    const info = result
+      ? { extract: result.extract, image: result.thumbnail?.source || result.originalimage?.source || null, url: result.content_urls?.desktop?.page }
+      : { extract:null, image:null, url:null };
+    wikiCache[cacheKey] = info;
+    return info;
+  }catch(e){
+    return { extract:null, image:null, url:null };
+  }
+}
+
+async function fetchSummary(lang, title){
+  try{
+    const resp = await fetch(`https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
+    if(!resp.ok) return null;
+    const data = await resp.json();
+    if(data.type === "disambiguation") return null;
+    return data;
+  }catch(e){ return null; }
+}
+
+async function searchWikiTitle(lang, name){
+  try{
+    const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(name)}&format=json&origin=*&srlimit=1`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    return data.query?.search?.[0]?.title || null;
+  }catch(e){ return null; }
+}
+
+document.getElementById('closeDetail').addEventListener('click', ()=>{
+  document.getElementById('detail').classList.remove('open');
+});
+
+/* ---------------- СТАРТ ---------------- */
+loadPOIs(currentLocation, currentCityName);
+</script>
+</body>
+</html>
