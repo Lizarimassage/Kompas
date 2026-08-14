@@ -381,8 +381,9 @@
 <script>
 /* ============ КОНФИГ ============ */
 const OVERPASS_URLS=[
-  "https://overpass.kumi.systems/api/interpreter",
   "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.openstreetmap.fr/api/interpreter",
   "https://overpass.private.coffee/api/interpreter"
 ];
 const NOMINATIM_URL="https://nominatim.openstreetmap.org";
@@ -500,10 +501,13 @@ function dedupe(list){
 }
 
 /* ============ ЗАГРУЗКА МЕСТ (Overpass) ============ */
+let lastLoadError='';
+
 async function loadPOIs(loc,label){
   currentLocation=loc;currentCityName=label;
   cityLabel.textContent=label;
   loadState="loading";
+  lastLoadError='';
   rawData={attraction:[],food:[],shop:[]};
   updateCounts();render();
   try{
@@ -512,12 +516,17 @@ async function loadPOIs(loc,label){
     for(const url of OVERPASS_URLS){
       try{
         const ctrl=new AbortController();
-        const t=setTimeout(()=>ctrl.abort(),20000);
+        /* таймаут держим больше, чем внутренний [timeout:25] самого Overpass-запроса,
+           иначе клиент обрывает соединение раньше, чем сервер успевает ответить */
+        const t=setTimeout(()=>ctrl.abort(),28000);
         const resp=await fetch(url,{method:"POST",body,signal:ctrl.signal});
         clearTimeout(t);
-        if(!resp.ok) throw new Error("Overpass "+resp.status);
+        if(!resp.ok) throw new Error(`${new URL(url).hostname} → HTTP ${resp.status}`);
         data=await resp.json();break;
-      }catch(e){lastErr=e;}
+      }catch(e){
+        lastErr=e;
+        lastLoadError+=(lastLoadError?' · ':'')+`${new URL(url).hostname}: ${e.name==='AbortError'?'таймаут':e.message}`;
+      }
     }
     if(!data) throw lastErr||new Error("Все сервера Overpass недоступны");
     (data.elements||[]).forEach(el=>{
@@ -637,7 +646,7 @@ function render(){
     return;
   }
   if(loadState==='error'){
-    listEl.innerHTML=`<div class="error-msg">Не удалось загрузить данные.<br>Проверьте соединение с интернетом.<br><button class="retry-btn" id="retryBtn">Повторить</button></div>`;
+    listEl.innerHTML=`<div class="error-msg">Не удалось загрузить данные.<br>Публичные Overpass-серверы не ответили (перегружены или временно недоступны).<br><span style="opacity:.7;font-size:10px;word-break:break-word;display:block;margin-top:8px;">${escapeHtml(lastLoadError)}</span><br><button class="retry-btn" id="retryBtn">Повторить</button></div>`;
     document.getElementById('retryBtn').addEventListener('click',()=>loadPOIs(currentLocation,currentCityName));
     resultMeta.textContent='';
     return;
