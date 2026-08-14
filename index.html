@@ -392,6 +392,12 @@ const WIKI_SUMMARY_URL="https://ru.wikipedia.org/api/rest_v1/page/summary/";
 const RADIUS={attraction:3500,food:2000,shop:2000};
 const CAT_LABEL={attraction:"Достопримечательность",food:"Еда",shop:"Продукты"};
 
+/* Резервный источник данных о местах (используется, только если ВСЕ Overpass-зеркала не ответили).
+   Вставь сюда свой бесплатный ключ с myprojects.geoapify.com — как получить, см. инструкцию в чате.
+   Если оставить как есть — приложение просто продолжит пытаться через Overpass и покажет ошибку,
+   если и он недоступен. */
+const GEOAPIFY_KEY="630cb5bbcabd45679f5314e89aacd05f";
+
 /* Стартовый город — Санкт-Петербург */
 let currentLocation={lat:59.9311,lng:30.3609};
 let currentCityName="Санкт-Петербург";
@@ -500,7 +506,36 @@ function dedupe(list){
   return out;
 }
 
-/* ============ ЗАГРУЗКА МЕСТ (Overpass) ============ */
+/* ============ РЕЗЕРВНЫЙ ИСТОЧНИК: GEOAPIFY ============
+   Отдельный хостируемый сервис (не волонтёрские зеркала), поэтому не подвержен
+   перегрузкам публичных Overpass-серверов. Требует бесплатный ключ. */
+const GEOAPIFY_CATEGORIES={
+  attraction:'tourism.sights,entertainment.museum,building.historic',
+  food:'catering.restaurant,catering.cafe,catering.fast_food,catering.bar,catering.pub,catering.food_court',
+  shop:'commercial.supermarket,commercial.convenience,commercial.marketplace,commercial.food_and_drink'
+};
+
+async function fetchGeoapify(loc,cat){
+  const url=`https://api.geoapify.com/v2/places?categories=${encodeURIComponent(GEOAPIFY_CATEGORIES[cat])}&filter=circle:${loc.lng},${loc.lat},${RADIUS[cat]}&bias=proximity:${loc.lng},${loc.lat}&limit=20&apiKey=${GEOAPIFY_KEY}`;
+  const resp=await fetchWithTimeout(url,{},15000);
+  if(!resp.ok) throw new Error('HTTP '+resp.status);
+  const data=await resp.json();
+  const feats=data.features||[];
+  return feats.map(f=>{
+    const p=f.properties||{};
+    if(!p.name) return null;
+    const item={
+      id:'ga_'+(p.place_id||(p.name+p.lat+p.lon)),
+      cat,name:cleanName(p.name),kind:CAT_LABEL[cat],
+      lat:p.lat,lng:p.lon,tags:{},
+      addr:[p.street,p.housenumber].filter(Boolean).join(', ')||p.address_line2||null
+    };
+    item.dist=distanceKm(loc,item);
+    return item;
+  }).filter(Boolean);
+}
+
+/* ============ ЗАГРУЗКА МЕСТ ============ */
 let lastLoadError='';
 
 async function loadPOIs(loc,label){
@@ -510,14 +545,16 @@ async function loadPOIs(loc,label){
   lastLoadError='';
   rawData={attraction:[],food:[],shop:[]};
   updateCounts();render();
+
+  let success=false;
+
+  /* 1. Основной источник — Overpass (данные OSM напрямую, один запрос на всё) */
   try{
     const body="data="+encodeURIComponent(buildOverpassQuery(loc.lat,loc.lng));
     let data=null,lastErr=null;
     for(const url of OVERPASS_URLS){
       try{
         const ctrl=new AbortController();
-        /* таймаут держим больше, чем внутренний [timeout:25] самого Overpass-запроса,
-           иначе клиент обрывает соединение раньше, чем сервер успевает ответить */
         const t=setTimeout(()=>ctrl.abort(),28000);
         const resp=await fetch(url,{method:"POST",body,signal:ctrl.signal});
         clearTimeout(t);
@@ -548,8 +585,31 @@ async function loadPOIs(loc,label){
       rawData[c].sort((a,b)=>a.dist-b.dist);
       rawData[c]=dedupe(rawData[c]).slice(0,20);
     });
-    loadState="done";
-  }catch(e){console.error(e);loadState="error";}
+    success=true;
+  }catch(e){console.error(e);}
+
+  /* 2. Если Overpass полностью недоступен — пробуем Geoapify (если вставлен ключ) */
+  if(!success){
+    if(GEOAPIFY_KEY && GEOAPIFY_KEY!=='ВАШ_КЛЮЧ_GEOAPIFY'){
+      try{
+        const [att,food,shop]=await Promise.all([
+          fetchGeoapify(loc,'attraction'),
+          fetchGeoapify(loc,'food'),
+          fetchGeoapify(loc,'shop')
+        ]);
+        rawData.attraction=dedupe(att.sort((a,b)=>a.dist-b.dist)).slice(0,20);
+        rawData.food=dedupe(food.sort((a,b)=>a.dist-b.dist)).slice(0,20);
+        rawData.shop=dedupe(shop.sort((a,b)=>a.dist-b.dist)).slice(0,20);
+        success=true;
+      }catch(e){
+        lastLoadError+=(lastLoadError?' · ':'')+'Geoapify: '+e.message;
+      }
+    }else{
+      lastLoadError+=(lastLoadError?' · ':'')+'Geoapify не подключён (нет ключа в GEOAPIFY_KEY)';
+    }
+  }
+
+  loadState=success?"done":"error";
   updateCounts();render();
 }
 
