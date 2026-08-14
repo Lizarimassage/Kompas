@@ -391,13 +391,16 @@ const WIKI_SUMMARY_URL="https://ru.wikipedia.org/api/rest_v1/page/summary/";
 const RADIUS={attraction:3500,food:2000,shop:2000};
 const CAT_LABEL={attraction:"Достопримечательность",food:"Еда",shop:"Продукты"};
 
-/* КЛЮЧ 2ГИС — вставь сюда свой ключ Web API с platform.2gis.com
-   Тестовый тариф бесплатный (50 000 запросов/месяц).
-   Для работы также добавь домен lizarimassage.github.io в разрешённые
-   источники в личном кабинете 2ГИС (раздел «Ключи»). */
+/* Ключ 2ГИС Catalog API. ВАЖНО: этот API рассчитан на серверные интеграции —
+   если увидишь в консоли браузера ошибку CORS для catalog.api.2gis.com, значит
+   ключ не поддерживает прямые запросы из браузера, и нужно либо получить у 2ГИС
+   ключ именно для клиентских (browser) приложений, либо проксировать запрос
+   через свой сервер. Код ниже НЕ ломается в этом случае — просто пропускает
+   2ГИС и использует Overpass/Geoapify. */
 const DG_KEY="fd6ad9b4-7ae9-467c-92d6-8d36e7480a70";
 
-/* Резервный источник (если ВСЕ Overpass недоступны и 2ГИС не настроен) */
+/* Резервный источник, используется автоматически для ЛЮБОЙ вкладки,
+   которая осталась пустой после Overpass + 2ГИС */
 const GEOAPIFY_KEY="630cb5bbcabd45679f5314e89aacd05f";
 
 let currentLocation={lat:59.9311,lng:30.3609};
@@ -498,20 +501,21 @@ function dedupe(list){
   return out;
 }
 
-/* ============ 2ГИС ============
-   Рубрики: 182=кафе, 234=рестораны, 191=бары/пабы, 178=продуктовые магазины.
-   Для еды берём кафе+рестораны+бары, для магазинов — только продовольственные. */
+/* ============ 2ГИС ============ */
 const DG_RUBRICS={
-  food:'182,234,191,216,186',   /* кафе, рестораны, бары, фастфуд, фудкорты */
-  shop:'178'                    /* продовольственные магазины */
+  food:'182,234,191,216,186',
+  shop:'178'
 };
 
 async function fetch2GIS(loc,cat){
   if(!DG_KEY) return [];
   const url=`https://catalog.api.2gis.com/3.0/items?point=${loc.lng},${loc.lat}&radius=${RADIUS[cat]}&rubric_id=${DG_RUBRICS[cat]}&key=${DG_KEY}&fields=items.point,items.adm_div,items.reviews,items.schedule,items.contact_groups,items.external_content,items.rubrics,items.name_ex&region=&page=1&page_size=25`;
   const resp=await fetchWithTimeout(url,{},12000);
-  if(!resp.ok) throw new Error('2GIS HTTP '+resp.status);
+  if(!resp.ok) throw new Error('HTTP '+resp.status);
   const data=await resp.json();
+  if(data.meta && data.meta.code && data.meta.code!==200){
+    throw new Error('API '+data.meta.code+(data.meta.error?': '+data.meta.error.message:''));
+  }
   const items=(data.result&&data.result.items)||[];
   return items.map(it=>{
     const name=(it.name_ex&&it.name_ex.primary)||it.name||'Без названия';
@@ -525,14 +529,14 @@ async function fetch2GIS(loc,cat){
       lat:it.point.lat,
       lng:it.point.lon,
       tags:{},
-      addr:it.adm_div?.full||it.adm_div?.street||null,
-      dgRating:it.reviews?.rating||null,
-      dgReviewCount:it.reviews?.review_count||0,
+      addr:(it.adm_div&&(it.adm_div.full||it.adm_div.street))||null,
+      dgRating:(it.reviews&&it.reviews.rating)||null,
+      dgReviewCount:(it.reviews&&it.reviews.review_count)||0,
       dgSchedule:it.schedule||null,
-      dgPhone:(it.contact_groups||[]).flatMap(g=>g.contacts||[]).find(c=>c.type==='phone')?.value||null,
+      dgPhone:((it.contact_groups||[]).flatMap(g=>g.contacts||[]).find(c=>c.type==='phone')||{}).value||null,
       dgPhotos:(it.external_content||[]).filter(x=>x.type==='photo').map(x=>x.url)||[],
-      dgUrl:it.external_content?.find(x=>x.type==='bookkeeping')?.url
-          || (it.external_content||[]).find(x=>x.type==='website')?.url || null,
+      dgUrl:(((it.external_content||[]).find(x=>x.type==='bookkeeping')||{}).url)
+          || (((it.external_content||[]).find(x=>x.type==='website')||{}).url) || null,
       dgId:it.id
     };
     p.dist=distanceKm(loc,p);
@@ -568,7 +572,15 @@ async function fetchGeoapify(loc,cat){
   }).filter(Boolean);
 }
 
-/* ============ ЗАГРУЗКА МЕСТ ============ */
+/* ============ ЗАГРУЗКА МЕСТ ============
+   Важное отличие от предыдущей версии: раньше флаг success выставлялся в true,
+   если Overpass отработал БЕЗ ОШИБКИ — даже если по факту вернул 0 объектов
+   (так бывает при частичной деградации публичных серверов). Из-за этого
+   резервный Geoapify не подключался, категории оставались пустыми, и
+   открывать было физически нечего — отсюда и "не даёт провалиться в карточку".
+   Теперь считаем успехом только реальное наличие данных в каждой категории,
+   и Geoapify подключается точечно для тех вкладок, где после Overpass+2ГИС
+   так ничего и не появилось. */
 let lastLoadError='';
 
 async function loadPOIs(loc,label){
@@ -579,10 +591,7 @@ async function loadPOIs(loc,label){
   rawData={attraction:[],food:[],shop:[]};
   updateCounts();render();
 
-  let success=false;
-
-  /* 1. Overpass — основной источник для достопримечательностей
-     (для еды и магазинов тоже тянем как фолбэк) */
+  /* 1. Overpass — основной источник (для всех трёх категорий сразу) */
   try{
     const body="data="+encodeURIComponent(buildOverpassQuery(loc.lat,loc.lng));
     let data=null,lastErr=null;
@@ -596,7 +605,7 @@ async function loadPOIs(loc,label){
         data=await resp.json();break;
       }catch(e){
         lastErr=e;
-        lastLoadError+=(lastLoadError?' · ':'')+`${new URL(url).hostname}: ${e.name==='AbortError'?'таймаут':e.message}`;
+        lastLoadError+=(lastLoadError?' · ':'')+`Overpass ${new URL(url).hostname}: ${e.name==='AbortError'?'таймаут':e.message}`;
       }
     }
     if(!data) throw lastErr||new Error("Все сервера Overpass недоступны");
@@ -615,10 +624,11 @@ async function loadPOIs(loc,label){
       p.dist=distanceKm(loc,p);
       rawData[cat].push(p);
     });
-    success=true;
-  }catch(e){console.error(e);}
+  }catch(e){
+    console.error('Overpass error',e);
+  }
 
-  /* 2. 2ГИС — для еды и магазинов (параллельно с Overpass, если есть ключ) */
+  /* 2. 2ГИС — обогащаем/заменяем еду и магазины (если ключ настроен) */
   if(DG_KEY){
     try{
       const [food2,shop2]=await Promise.all([
@@ -627,37 +637,36 @@ async function loadPOIs(loc,label){
       ]);
       if(food2.length) rawData.food=food2;
       if(shop2.length) rawData.shop=shop2;
-      success=true;
     }catch(e){
-      lastLoadError+=(lastLoadError?' · ':'')+'2ГИС: '+e.message;
-      /* оставляем данные из Overpass как фолбэк */
+      console.error('2GIS error',e);
+      lastLoadError+=(lastLoadError?' · ':'')+'2ГИС: '+(e.message||'ошибка сети (возможно, CORS — ключ Catalog API рассчитан на серверные запросы)');
     }
   }
 
-  /* 3. Сортировка, дедупликация, обрезка */
+  /* 3. Сортировка + дедупликация того, что уже есть */
   Object.keys(rawData).forEach(c=>{
     rawData[c].sort((a,b)=>a.dist-b.dist);
     rawData[c]=dedupe(rawData[c]).slice(0,20);
   });
 
-  /* 4. Если Overpass полностью недоступен и 2ГИС нет — пробуем Geoapify */
-  if(!success){
+  /* 4. Geoapify — точечно для каждой категории, которая всё ещё пустая */
+  const emptyCats=Object.keys(rawData).filter(c=>rawData[c].length===0);
+  if(emptyCats.length){
     try{
-      const [att,food,shop]=await Promise.all([
-        fetchGeoapify(loc,'attraction'),
-        fetchGeoapify(loc,'food'),
-        fetchGeoapify(loc,'shop')
-      ]);
-      if(att.length) rawData.attraction=dedupe(att.sort((a,b)=>a.dist-b.dist)).slice(0,20);
-      if(food.length) rawData.food=dedupe(food.sort((a,b)=>a.dist-b.dist)).slice(0,20);
-      if(shop.length) rawData.shop=dedupe(shop.sort((a,b)=>a.dist-b.dist)).slice(0,20);
-      success=!!(att.length||food.length||shop.length);
+      const results=await Promise.all(emptyCats.map(c=>fetchGeoapify(loc,c)));
+      emptyCats.forEach((c,i)=>{
+        if(results[i] && results[i].length){
+          rawData[c]=dedupe(results[i].sort((a,b)=>a.dist-b.dist)).slice(0,20);
+        }
+      });
     }catch(e){
+      console.error('Geoapify error',e);
       lastLoadError+=(lastLoadError?' · ':'')+'Geoapify: '+e.message;
     }
   }
 
-  loadState=success?"done":"error";
+  const total=rawData.attraction.length+rawData.food.length+rawData.shop.length;
+  loadState=total>0?"done":"error";
   updateCounts();render();
 }
 
@@ -754,7 +763,7 @@ function render(){
     return;
   }
   if(loadState==='error'){
-    listEl.innerHTML=`<div class="error-msg">Не удалось загрузить данные.<br>Публичные серверы не ответили.<br><span style="opacity:.7;font-size:10px;word-break:break-word;display:block;margin-top:8px;">${escapeHtml(lastLoadError)}</span><br><button class="retry-btn" id="retryBtn">Повторить</button></div>`;
+    listEl.innerHTML=`<div class="error-msg">Не удалось загрузить данные ни из одного источника.<br><span style="opacity:.7;font-size:10px;word-break:break-word;display:block;margin-top:8px;">${escapeHtml(lastLoadError)}</span><br><button class="retry-btn" id="retryBtn">Повторить</button></div>`;
     document.getElementById('retryBtn').addEventListener('click',()=>loadPOIs(currentLocation,currentCityName));
     resultMeta.textContent='';
     return;
@@ -762,7 +771,7 @@ function render(){
   const items=rawData[activeCat]||[];
   resultMeta.textContent=items.length?`${items.length} найдено`:'';
   if(!items.length){
-    listEl.innerHTML=`<div class="empty-msg">Ничего не найдено рядом.<br>Попробуйте другой город или категорию.</div>`;
+    listEl.innerHTML=`<div class="empty-msg">Ничего не найдено рядом в этой категории.<br>Попробуйте другой город или вкладку.</div>`;
     return;
   }
   listEl.innerHTML=items.map(p=>`
@@ -778,14 +787,13 @@ function render(){
       </div>
     </div>`).join('');
 
-  /* ИСПРАВЛЕННЫЙ ОБРАБОТЧИК КЛИКА — id сравниваем как строки,
-     ищем актуальный poi из rawData[activeCat], а не из замыкания items */
   listEl.querySelectorAll('.poi-card').forEach(card=>{
     card.addEventListener('click',()=>{
       const idStr=card.dataset.id;
       const currentItems=rawData[activeCat]||[];
       const poi=currentItems.find(x=>String(x.id)===idStr);
       if(poi) openDetail(poi);
+      else console.error('POI не найден для id',idStr);
     });
   });
 }
@@ -880,15 +888,13 @@ function buildLocalDescription(poi){
   const parts=[];
   if(poi.kind) parts.push(poi.kind);
 
-  /* Данные из 2ГИС (если есть) */
   if(poi.dgRating) parts.push(`Рейтинг 2ГИС: ${poi.dgRating}/5 (${poi.dgReviewCount} отзывов)`);
   if(poi.dgPhone) parts.push('Телефон: '+poi.dgPhone);
-  if(poi.dgSchedule && poi.dgSchedule.today){
-    const hours=(poi.dgSchedule.today.working_hours||[]).map(w=>w.from+'–'+w.to).join(', ');
+  if(poi.dgSchedule && poi.dgSchedule.today && poi.dgSchedule.today.working_hours){
+    const hours=poi.dgSchedule.today.working_hours.map(w=>w.from+'–'+w.to).join(', ');
     if(hours) parts.push('Сегодня: '+hours);
   }
 
-  /* Данные из OSM-тегов (если нет 2ГИС) */
   if(!poi.dgRating){
     if(t.cuisine) parts.push('кухня: '+t.cuisine.replace(/_/g,', '));
     if(t.opening_hours) parts.push('часы работы: '+t.opening_hours);
@@ -945,7 +951,6 @@ async function openDetail(poi){
         : `Статья в Wikipedia для этого места не найдена`;
     });
   }else{
-    /* Еда и магазины — фото из 2ГИС (если есть), описание из 2ГИС или OSM */
     if(poi.dgPhotos && poi.dgPhotos.length){
       img.onload=()=>{spinner.style.display='none';img.classList.remove('hidden');};
       img.onerror=()=>{spinner.style.display='none';};
@@ -1008,7 +1013,6 @@ function renderRateBox(poi){
       date:new Date().toLocaleDateString('ru-RU')
     });
     renderRateBox(poi);
-    render();
   });
 }
 
