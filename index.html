@@ -265,7 +265,6 @@
     font-size:13px;font-weight:600;color:var(--dim);margin-bottom:22px;
     display:flex;gap:8px;align-items:center;padding:13px 16px;
     background:var(--glass);border:1px solid var(--line);border-radius:16px;
-    word-break:break-word;
   }
   #detail p.desc{font-size:15px;line-height:1.8;color:rgba(238,241,255,.85);white-space:pre-line;}
   #detail .src-note{
@@ -414,27 +413,12 @@ function distanceKm(a,b){
   return R*2*Math.atan2(Math.sqrt(s),Math.sqrt(1-s));
 }
 function escapeHtml(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
-
-// Чистим название: убираем "музей", "памятник", "мемориал" и тп, оставляя суть
-function cleanName(name, tags){
-  if(!name) return name;
-  let n=name;
-  const removeWords = ['музей','памятник','мемориал','монумент','часовня','собор','храм','церковь','мечеть','синагога','аллея','сквер','парк','площадь','улица','станция','деревня','село','город','посёлок','район','область','республика'];
-  const words=n.split(' ');
-  const filtered=words.filter(w=>{
-    const wl=w.toLowerCase();
-    if(removeWords.some(r=>wl.includes(r) && wl.length>3)) return false;
-    return true;
-  });
-  let cleaned=filtered.join(' ').trim();
-  if(!cleaned) cleaned=name;
-  return cleaned;
-}
+function subtypeLabel(p){const t=p.tags;return t.tourism||t.historic||t.amenity||t.shop||"";}
 
 function buildOverpassQuery(lat,lon){
   return `[out:json][timeout:25];(
     node["tourism"~"attraction|museum|viewpoint|gallery|artwork|zoo|theme_park"](around:${RADIUS.attraction},${lat},${lon});
-    node["historic"~"^(?!memorial|monument|tomb|grave|war_memorial).*$"](around:${RADIUS.attraction},${lat},${lon});
+    node["historic"](around:${RADIUS.attraction},${lat},${lon});
     node["amenity"~"restaurant|cafe|fast_food|bar|pub|food_court"](around:${RADIUS.food},${lat},${lon});
     node["shop"~"^(supermarket|convenience|grocery|bakery|butcher|deli|greengrocer|cheese|seafood|beverages|wine|confectionery)$"](around:${RADIUS.shop},${lat},${lon});
   );out body 80;`;
@@ -472,10 +456,8 @@ async function loadPOIs(loc,label){
       if(tags.brand && /ozon|wildberries|boxberry|cdek|сдэк|мтс|мегафон|билайн|tele2|пятёрочка/i.test(tags.brand)) return;
       const cat=classify(tags);
       if(!cat) return;
-      const clean = cleanName(tags.name, tags);
-      const p={id:el.id,cat,name:clean,lat:el.lat,lng:el.lon,tags,
-        addr:[tags["addr:street"],tags["addr:housenumber"]].filter(Boolean).join(", ")||
-             (tags["addr:full"]?tags["addr:full"]:"Адрес уточняется")};
+      const p={id:el.id,cat,name:tags.name,lat:el.lat,lng:el.lon,tags,
+        addr:[tags["addr:street"],tags["addr:housenumber"]].filter(Boolean).join(", ")||"Адрес уточняется"};
       p.dist=distanceKm(loc,p);
       rawData[cat].push(p);
     });
@@ -625,8 +607,6 @@ function render(){
   });
 }
 
-function subtypeLabel(p){const t=p.tags;return t.tourism||t.historic||t.amenity||t.shop||"";}
-
 function renderRateBox(p){
   const box=document.getElementById('rateBox');
   const reviews=getReviews(p);const avg=avgRating(p);
@@ -761,21 +741,15 @@ function titleMatches(name,title){
 }
 
 async function findPhoto(p){
-  // Сначала пробуем получить фото через Wikidata
   if(p.tags.wikidata){
     try{
       const url=`https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&origin=*&ids=${p.tags.wikidata}&props=claims`;
       const data=await(await fetch(url)).json();
       const claims=data.entities&&data.entities[p.tags.wikidata]&&data.entities[p.tags.wikidata].claims;
       const file=claims&&claims.P18&&claims.P18[0]&&claims.P18[0].mainsnak&&claims.P18[0].mainsnak.datavalue&&claims.P18[0].mainsnak.datavalue.value;
-      if(file){
-        const photoUrl=`https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(file)}?width=1000`;
-        return photoUrl;
-      }
+      if(file) return `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(file)}?width=1000`;
     }catch(e){}
   }
-  
-  // Затем ищем через Википедию
   try{
     const q=encodeURIComponent(p.name+" "+currentCityName);
     const url=`https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&generator=search&gsrsearch=${q}&gsrnamespace=6&gsrlimit=5&prop=imageinfo&iiprop=url|mime&iiurlwidth=1000`;
@@ -786,23 +760,6 @@ async function findPhoto(p){
       for(const pg of arr){
         const ii=pg.imageinfo&&pg.imageinfo[0];
         if(ii&&ii.mime&&/image\/(jpeg|png|webp)/.test(ii.mime)&&titleMatches(p.name,pg.title)){
-          return ii.thumburl||ii.url;
-        }
-      }
-    }
-  }catch(e){}
-  
-  // Если ничего не нашли, пробуем поискать по названию объекта
-  try{
-    const q=encodeURIComponent(p.name);
-    const url=`https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&generator=search&gsrsearch=${q}&gsrnamespace=6&gsrlimit=3&prop=imageinfo&iiprop=url|mime&iiurlwidth=1000`;
-    const data=await(await fetch(url)).json();
-    const pages=data.query&&data.query.pages;
-    if(pages){
-      const arr=Object.values(pages).sort((a,b)=>(a.index||0)-(b.index||0));
-      for(const pg of arr){
-        const ii=pg.imageinfo&&pg.imageinfo[0];
-        if(ii&&ii.mime&&/image\/(jpeg|png|webp)/.test(ii.mime)){
           return ii.thumburl||ii.url;
         }
       }
