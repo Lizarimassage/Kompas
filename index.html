@@ -429,10 +429,10 @@ function fmtDist(km){
   return km<1 ? `${Math.round(km*1000)} м` : `${km.toFixed(1)} км`;
 }
 
-/* Чистим название: убираем родовые слова, оставляя суть */
+/* Чистим название: убираем родовые слова, оставляя суть (для обычных мест) */
 function cleanName(name){
   if(!name) return name;
-  const removeWords=['музей','памятник','мемориал','монумент','часовня','собор','храм','церковь','мечеть','синагога','аллея','сквер','парк','площадь','улица','станция','деревня','село','город','посёлок','район','область','республика'];
+  const removeWords=['музей','мемориал','монумент','часовня','собор','храм','церковь','мечеть','синагога','аллея','сквер','парк','площадь','улица','станция','деревня','село','город','посёлок','район','область','республика'];
   const words=name.split(' ');
   const filtered=words.filter(w=>{
     const wl=w.toLowerCase();
@@ -443,10 +443,36 @@ function cleanName(name){
   return cleaned||name;
 }
 
+/* Для памятников/монументов оставляем исходное посвящение (оно уже в родительном падеже)
+   и добавляем спереди "Памятник", вместо того чтобы показывать сырой тип OSM (memorial/museum и т.п.) */
+function buildDisplayName(rawName,tags){
+  const h=(tags.historic||'').toLowerCase();
+  const isMemorial=/memorial|monument|statue/.test(h);
+  if(isMemorial){
+    let n=rawName.trim();
+    if(!/^памятник\b/i.test(n)) n='Памятник '+n;
+    return n;
+  }
+  return cleanName(rawName);
+}
+
+/* Человекочитаемые категории вместо сырых OSM-тегов amenity/shop/historic */
+const KIND_LABEL={
+  restaurant:'Ресторан',cafe:'Кафе',fast_food:'Быстрое питание',bar:'Бар',pub:'Паб',food_court:'Фудкорт',
+  supermarket:'Супермаркет',convenience:'Магазин у дома',grocery:'Продуктовый магазин',bakery:'Пекарня',
+  butcher:'Мясная лавка',deli:'Деликатесы',greengrocer:'Овощи и фрукты',cheese:'Сырная лавка',
+  seafood:'Морепродукты',beverages:'Напитки',wine:'Винный магазин',confectionery:'Кондитерская',
+  museum:'Музей',viewpoint:'Смотровая площадка',gallery:'Галерея',artwork:'Арт-объект',zoo:'Зоопарк',
+  theme_park:'Парк развлечений',attraction:'Достопримечательность'
+};
+function kindOf(tags){
+  return KIND_LABEL[tags.tourism]||KIND_LABEL[tags.amenity]||KIND_LABEL[tags.shop]||null;
+}
+
 function buildOverpassQuery(lat,lon){
   return `[out:json][timeout:25];(
     node["tourism"~"attraction|museum|viewpoint|gallery|artwork|zoo|theme_park"](around:${RADIUS.attraction},${lat},${lon});
-    node["historic"~"^(?!memorial|monument|tomb|grave|war_memorial).*$"](around:${RADIUS.attraction},${lat},${lon});
+    node["historic"~"^(?!tomb|grave)"](around:${RADIUS.attraction},${lat},${lon});
     node["amenity"~"restaurant|cafe|fast_food|bar|pub|food_court"](around:${RADIUS.food},${lat},${lon});
     node["shop"~"^(supermarket|convenience|grocery|bakery|butcher|deli|greengrocer|cheese|seafood|beverages|wine|confectionery)$"](around:${RADIUS.shop},${lat},${lon});
   );out body 80;`;
@@ -456,6 +482,21 @@ function classify(tags){
   if(tags.amenity) return "food";
   if(tags.shop) return "shop";
   return null;
+}
+
+/* Убираем дубли: одинаковый id, а также разные id с одинаковым именем и почти одинаковым расстоянием
+   (частая проблема данных OSM — один и тот же объект замаплен дважды) */
+function dedupe(list){
+  const seenIds=new Set();
+  const out=[];
+  for(const p of list){
+    if(seenIds.has(p.id)) continue;
+    seenIds.add(p.id);
+    const dup=out.find(o=>o.name.toLowerCase()===p.name.toLowerCase() && Math.abs(o.dist-p.dist)<0.02);
+    if(dup) continue;
+    out.push(p);
+  }
+  return out;
 }
 
 /* ============ ЗАГРУЗКА МЕСТ (Overpass) ============ */
@@ -485,9 +526,9 @@ async function loadPOIs(loc,label){
       if(tags.brand && /ozon|wildberries|boxberry|cdek|сдэк|мтс|мегафон|билайн|tele2|пятёрочка/i.test(tags.brand)) return;
       const cat=classify(tags);
       if(!cat) return;
-      const clean=cleanName(tags.name);
+      const displayName=buildDisplayName(tags.name,tags);
       const p={
-        id:el.id,cat,name:clean,lat:el.lat,lng:el.lon,tags,
+        id:el.id,cat,name:displayName,kind:kindOf(tags),lat:el.lat,lng:el.lon,tags,
         addr:[tags["addr:street"],tags["addr:housenumber"]].filter(Boolean).join(", ")||
              (tags["addr:full"]?tags["addr:full"]:null)
       };
@@ -496,7 +537,7 @@ async function loadPOIs(loc,label){
     });
     Object.keys(rawData).forEach(c=>{
       rawData[c].sort((a,b)=>a.dist-b.dist);
-      rawData[c]=rawData[c].slice(0,20);
+      rawData[c]=dedupe(rawData[c]).slice(0,20);
     });
     loadState="done";
   }catch(e){console.error(e);loadState="error";}
@@ -628,49 +669,110 @@ function render(){
   });
 }
 
-/* ============ ТОЧНЫЙ АДРЕС (Nominatim reverse) ============ */
+/* ============ ТОЧНЫЙ АДРЕС ============ */
+async function fetchWithTimeout(url,opts,ms){
+  const ctrl=new AbortController();
+  const t=setTimeout(()=>ctrl.abort(),ms);
+  try{
+    const resp=await fetch(url,{...opts,signal:ctrl.signal});
+    clearTimeout(t);
+    return resp;
+  }catch(e){
+    clearTimeout(t);
+    throw e;
+  }
+}
+
 async function reverseGeocode(lat,lng){
   const key=lat.toFixed(5)+','+lng.toFixed(5);
   if(addrCache[key]!==undefined) return addrCache[key];
+
+  /* 1. Основной источник — Nominatim (даёт улицу и дом) */
   try{
     const url=`${NOMINATIM_URL}/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1&accept-language=ru`;
-    const data=await (await fetch(url,{headers:{"Accept":"application/json"}})).json();
+    const data=await (await fetchWithTimeout(url,{headers:{"Accept":"application/json"}},9000)).json();
     const a=data.address||{};
     const street=[a.road,a.house_number].filter(Boolean).join(', ');
     const locality=a.city||a.town||a.village||a.suburb;
     const parts=[street,locality].filter(Boolean);
     const result=parts.length?parts.join(', '):(data.display_name?data.display_name.split(',').slice(0,3).join(', '):null);
-    addrCache[key]=result;
-    return result;
+    if(result){addrCache[key]=result;return result;}
+  }catch(e){/* переходим к резервному источнику */}
+
+  /* 2. Резервный источник — BigDataCloud (без ключа, CORS-friendly) на случай,
+     если Nominatim не ответил вовремя или ограничил запрос */
+  try{
+    const url2=`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=ru`;
+    const d2=await (await fetchWithTimeout(url2,{},9000)).json();
+    const parts2=[d2.locality,d2.city&&d2.city!==d2.locality?d2.city:null].filter(Boolean);
+    const result2=parts2.length?parts2.join(', '):null;
+    addrCache[key]=result2;
+    return result2;
   }catch(e){
     addrCache[key]=null;
     return null;
   }
 }
 
-/* ============ ФОТО + ОПИСАНИЕ (Wikipedia) ============ */
-async function fetchWikiInfo(poi){
-  const cacheKey=poi.name+'|'+currentCityName;
+/* ============ ФОТО + ОПИСАНИЕ ДЛЯ ДОСТОПРИМЕЧАТЕЛЬНОСТЕЙ ============
+   Важно: ищем статьи Wikipedia/Commons ПО КООРДИНАТАМ (геопоиск), а не по тексту названия.
+   Текстовый поиск по имени ловил случайные совпадения слов ("Дружба" → статья про дружбу,
+   "Надежда" → статья про надежду, памятник человеку → фото самого человека). Геопоиск
+   возвращает только то, что реально привязано к этой точке на карте. */
+
+async function fetchCommonsPhoto(lat,lng){
+  try{
+    const url=`https://commons.wikimedia.org/w/api.php?action=query&generator=geosearch&ggscoord=${lat}|${lng}&ggsradius=250&ggslimit=6&prop=imageinfo&iiprop=url&iiurlwidth=900&format=json&origin=*`;
+    const data=await (await fetchWithTimeout(url,{},9000)).json();
+    const pages=data?.query?.pages;
+    if(!pages) return null;
+    for(const key in pages){
+      const info=pages[key].imageinfo?.[0];
+      const src=info?.thumburl||info?.url;
+      if(src && /\.(jpe?g|png)$/i.test(src)) return src;
+    }
+    return null;
+  }catch(e){return null;}
+}
+
+async function fetchAttractionMedia(poi){
+  const cacheKey='geo:'+poi.id;
   if(wikiCache[cacheKey]) return wikiCache[cacheKey];
   try{
-    const searchUrl=`${WIKI_API_URL}?action=query&list=search&srsearch=${encodeURIComponent(poi.name+' '+currentCityName)}&format=json&origin=*&srlimit=1`;
-    const searchData=await (await fetch(searchUrl)).json();
-    const hit=searchData?.query?.search?.[0];
-    if(!hit) throw new Error('no wiki match');
-    const title=hit.title;
-    const summary=await (await fetch(WIKI_SUMMARY_URL+encodeURIComponent(title))).json();
-    const result={
-      desc: summary.extract || null,
-      image: (summary.thumbnail && summary.thumbnail.source) || (summary.originalimage && summary.originalimage.source) || null,
-      wikiUrl: summary.content_urls?.desktop?.page || null
-    };
+    const geoUrl=`${WIKI_API_URL}?action=query&list=geosearch&gscoord=${poi.lat}|${poi.lng}&gsradius=250&gslimit=6&format=json&origin=*`;
+    const geoData=await (await fetchWithTimeout(geoUrl,{},9000)).json();
+    const candidates=geoData?.query?.geosearch||[];
+    if(!candidates.length) throw new Error('no geosearch results');
+    /* среди найденных рядом статей предпочитаем ту, что созвучна названию места */
+    const nameWords=poi.name.toLowerCase().replace(/^памятник\s+/,'').split(/\s+/).filter(w=>w.length>3);
+    const best=candidates.find(c=>{
+      const t=c.title.toLowerCase();
+      return nameWords.some(w=>t.includes(w));
+    })||candidates[0];
+    const summary=await (await fetchWithTimeout(WIKI_SUMMARY_URL+encodeURIComponent(best.title),{},9000)).json();
+    let image=(summary.thumbnail&&summary.thumbnail.source)||(summary.originalimage&&summary.originalimage.source)||null;
+    if(!image) image=await fetchCommonsPhoto(poi.lat,poi.lng);
+    const result={desc:summary.extract||null,image,wikiUrl:summary.content_urls?.desktop?.page||null};
     wikiCache[cacheKey]=result;
     return result;
   }catch(e){
-    const fallback={desc:null,image:null,wikiUrl:null};
+    let image=null;
+    try{image=await fetchCommonsPhoto(poi.lat,poi.lng);}catch(_e){}
+    const fallback={desc:null,image,wikiUrl:null};
     wikiCache[cacheKey]=fallback;
     return fallback;
   }
+}
+
+/* ============ ОПИСАНИЕ ДЛЯ ЕДЫ/МАГАЗИНОВ (без Wikipedia — там всё равно нет таких статей,
+   а текстовый поиск по названию заведения даёт мусор) ============ */
+function buildLocalDescription(poi){
+  const t=poi.tags||{};
+  const parts=[poi.kind||CAT_LABEL[poi.cat]];
+  if(t.cuisine) parts.push('кухня: '+t.cuisine.replace(/_/g,', '));
+  if(t.opening_hours) parts.push('часы работы: '+t.opening_hours);
+  if(t.phone||t['contact:phone']) parts.push('телефон: '+(t.phone||t['contact:phone']));
+  return parts.join('. ')+'.';
 }
 
 /* ============ ДЕТАЛЬНАЯ КАРТОЧКА ============ */
@@ -690,38 +792,44 @@ async function openDetail(poi){
   const img=document.getElementById('detailImg');
   const spinner=document.getElementById('detailSpinner');
   img.classList.add('hidden');img.src='';
-  spinner.style.display='flex';
 
   const descEl=document.getElementById('detailDesc');
-  descEl.textContent='Загружаем описание…';
-
   const srcEl=document.getElementById('detailSrc');
   srcEl.innerHTML='';
 
   renderRateBox(poi);
 
-  /* Уточняем точный адрес независимо от того, был ли он у OSM-тега */
+  /* Точный адрес — всегда через геокодирование, независимо от тегов OSM */
   reverseGeocode(poi.lat,poi.lng).then(addr=>{
     if(addr) addrEl.textContent=addr;
     else if(!poi.addr) addrEl.textContent='Точный адрес не найден';
   });
 
-  /* Подгружаем фото и описание из Wikipedia */
-  fetchWikiInfo(poi).then(info=>{
-    if(info.image){
-      img.onload=()=>{spinner.style.display='none';img.classList.remove('hidden');};
-      img.onerror=()=>{spinner.style.display='none';};
-      img.src=info.image;
-    }else{
-      spinner.style.display='none';
-    }
-    descEl.textContent = info.desc
-      ? info.desc
-      : `Подробное описание пока не найдено в Wikipedia. Это место категории «${CAT_LABEL[poi.cat]}», находится в ${fmtDist(poi.dist)} от выбранной точки.`;
-    srcEl.innerHTML = info.wikiUrl
-      ? `Источник описания и фото: <a href="${info.wikiUrl}" target="_blank">Wikipedia</a>`
-      : `Описание и фото в Wikipedia не найдены`;
-  });
+  if(poi.cat==='attraction'){
+    /* Для достопримечательностей — геопоиск в Wikipedia/Commons */
+    spinner.style.display='flex';
+    descEl.textContent='Загружаем описание…';
+    fetchAttractionMedia(poi).then(info=>{
+      if(info.image){
+        img.onload=()=>{spinner.style.display='none';img.classList.remove('hidden');};
+        img.onerror=()=>{spinner.style.display='none';};
+        img.src=info.image;
+      }else{
+        spinner.style.display='none';
+      }
+      descEl.textContent = info.desc
+        ? info.desc
+        : `Подробное описание пока не найдено. Это ${(poi.kind||'достопримечательность').toLowerCase()}, находится в ${fmtDist(poi.dist)} от выбранной точки.`;
+      srcEl.innerHTML = info.wikiUrl
+        ? `Источник: <a href="${info.wikiUrl}" target="_blank">Wikipedia</a>`
+        : `Статья в Wikipedia для этого места не найдена`;
+    });
+  }else{
+    /* Еда и магазины — без Wikipedia, только данные из OSM */
+    spinner.style.display='none';
+    descEl.textContent=buildLocalDescription(poi);
+    srcEl.innerHTML='Данные: OpenStreetMap';
+  }
 }
 
 document.getElementById('closeDetail').addEventListener('click',()=>{
