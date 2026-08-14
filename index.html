@@ -583,13 +583,8 @@ async function fetchGeoapify(loc,cat){
    так ничего и не появилось. */
 let lastLoadError='';
 
-async function loadPOIs(loc,label){
-  currentLocation=loc;currentCityName=label;
-  cityLabel.textContent=label;
-  loadState="loading";
-  lastLoadError='';
-  rawData={attraction:[],food:[],shop:[]};
-  updateCounts();render();
+async function attemptLoad(loc){
+  const attemptData={attraction:[],food:[],shop:[]};
 
   /* 1. Overpass — основной источник (для всех трёх категорий сразу) */
   try{
@@ -622,7 +617,7 @@ async function loadPOIs(loc,label){
              (tags["addr:full"]?tags["addr:full"]:null)
       };
       p.dist=distanceKm(loc,p);
-      rawData[cat].push(p);
+      attemptData[cat].push(p);
     });
   }catch(e){
     console.error('Overpass error',e);
@@ -635,8 +630,8 @@ async function loadPOIs(loc,label){
         fetch2GIS(loc,'food'),
         fetch2GIS(loc,'shop')
       ]);
-      if(food2.length) rawData.food=food2;
-      if(shop2.length) rawData.shop=shop2;
+      if(food2.length) attemptData.food=food2;
+      if(shop2.length) attemptData.shop=shop2;
     }catch(e){
       console.error('2GIS error',e);
       lastLoadError+=(lastLoadError?' · ':'')+'2ГИС: '+(e.message||'ошибка сети (возможно, CORS — ключ Catalog API рассчитан на серверные запросы)');
@@ -644,19 +639,19 @@ async function loadPOIs(loc,label){
   }
 
   /* 3. Сортировка + дедупликация того, что уже есть */
-  Object.keys(rawData).forEach(c=>{
-    rawData[c].sort((a,b)=>a.dist-b.dist);
-    rawData[c]=dedupe(rawData[c]).slice(0,20);
+  Object.keys(attemptData).forEach(c=>{
+    attemptData[c].sort((a,b)=>a.dist-b.dist);
+    attemptData[c]=dedupe(attemptData[c]).slice(0,20);
   });
 
   /* 4. Geoapify — точечно для каждой категории, которая всё ещё пустая */
-  const emptyCats=Object.keys(rawData).filter(c=>rawData[c].length===0);
+  const emptyCats=Object.keys(attemptData).filter(c=>attemptData[c].length===0);
   if(emptyCats.length){
     try{
       const results=await Promise.all(emptyCats.map(c=>fetchGeoapify(loc,c)));
       emptyCats.forEach((c,i)=>{
         if(results[i] && results[i].length){
-          rawData[c]=dedupe(results[i].sort((a,b)=>a.dist-b.dist)).slice(0,20);
+          attemptData[c]=dedupe(results[i].sort((a,b)=>a.dist-b.dist)).slice(0,20);
         }
       });
     }catch(e){
@@ -665,7 +660,33 @@ async function loadPOIs(loc,label){
     }
   }
 
-  const total=rawData.attraction.length+rawData.food.length+rawData.shop.length;
+  return attemptData;
+}
+
+function wait(ms){return new Promise(r=>setTimeout(r,ms));}
+
+async function loadPOIs(loc,label){
+  currentLocation=loc;currentCityName=label;
+  cityLabel.textContent=label;
+  loadState="loading";
+  lastLoadError='';
+  rawData={attraction:[],food:[],shop:[]};
+  updateCounts();render();
+
+  rawData=await attemptLoad(loc);
+  let total=rawData.attraction.length+rawData.food.length+rawData.shop.length;
+
+  /* Публичные сервисы (Overpass/2ГИС/Geoapify) иногда отдают временный сбой
+     или пустой ответ под нагрузкой — прежде чем сдаваться, тихо пробуем
+     ещё раз через паузу. Часто это само себя чинит без участия пользователя. */
+  if(total===0 && currentLocation===loc){
+    lastLoadError+=(lastLoadError?' · ':'')+'Первая попытка пустая — повтор через 3с…';
+    await wait(3000);
+    if(currentLocation!==loc) return; /* пользователь уже успел сменить город/локацию */
+    rawData=await attemptLoad(loc);
+    total=rawData.attraction.length+rawData.food.length+rawData.shop.length;
+  }
+
   loadState=total>0?"done":"error";
   updateCounts();render();
 }
