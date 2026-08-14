@@ -780,9 +780,12 @@ function render(){
 
   /* ИСПРАВЛЕННЫЙ ОБРАБОТЧИК КЛИКА — id сравниваем как строки,
      ищем актуальный poi из rawData[activeCat], а не из замыкания items */
-    Array.from(listEl.children).forEach((card,i)=>{
+      
+  listEl.querySelectorAll('.poi-card').forEach(card=>{
     card.addEventListener('click',()=>{
-      if(items[i]) openDetail(items[i]);
+      const id=parseInt(card.dataset.id,10);
+      const poi=items.find(x=>x.id===id);
+      if(poi) openDetail(poi);
     });
   });
 }
