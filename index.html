@@ -265,6 +265,7 @@
     font-size:13px;font-weight:600;color:var(--dim);margin-bottom:22px;
     display:flex;gap:8px;align-items:center;padding:13px 16px;
     background:var(--glass);border:1px solid var(--line);border-radius:16px;
+    word-break:break-word;
   }
   #detail p.desc{font-size:15px;line-height:1.8;color:rgba(238,241,255,.85);white-space:pre-line;}
   #detail .src-note{
@@ -334,10 +335,10 @@
   <header>
     <div class="eyebrow"><span class="dot" id="liveDot"></span> Полевой гид · живые данные</div>
     <h1>Компас</h1>
-    <div class="sub" id="cityLabel">Москва</div>
+    <div class="sub" id="cityLabel">Санкт-Петербург</div>
     <div class="search-wrap">
       <div class="locate-row">
-        <input id="citySearch" type="text" placeholder="Город, например: Тбилиси" autocomplete="off">
+        <input id="citySearch" type="text" placeholder="Город, например: Москва" autocomplete="off">
         <button id="geoBtn"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="6.5" stroke="#eafcff" stroke-width="2"/><circle cx="12" cy="12" r="2.4" fill="#eafcff"/><path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4" stroke="#eafcff" stroke-width="2" stroke-linecap="round"/></svg>Где я?</button>
       </div>
       <div id="suggestions"></div>
@@ -378,33 +379,44 @@
 </div>
 
 <script>
+/* ============ КОНФИГ ============ */
 const OVERPASS_URLS=[
   "https://overpass.kumi.systems/api/interpreter",
   "https://overpass-api.de/api/interpreter",
   "https://overpass.private.coffee/api/interpreter"
 ];
 const NOMINATIM_URL="https://nominatim.openstreetmap.org";
+const WIKI_API_URL="https://ru.wikipedia.org/w/api.php";
+const WIKI_SUMMARY_URL="https://ru.wikipedia.org/api/rest_v1/page/summary/";
 const RADIUS={attraction:3500,food:2000,shop:2000};
 const CAT_LABEL={attraction:"Достопримечательность",food:"Еда",shop:"Продукты"};
-const STORE_KEY="kompas_reviews_v1";
 
-let currentLocation={lat:55.7558,lng:37.6173};
-let currentCityName="Москва";
+/* Стартовый город — Санкт-Петербург */
+let currentLocation={lat:59.9311,lng:30.3609};
+let currentCityName="Санкт-Петербург";
 let activeCat="attraction";
 let rawData={attraction:[],food:[],shop:[]};
 let loadState="idle";
 let searchDebounce=null;
+
+/* Кэш карточек Wikipedia (фото + описание), живёт пока открыта вкладка */
 let wikiCache={};
+/* Кэш точных адресов по координатам */
+let addrCache={};
+/* Оценки/отзывы — хранятся в памяти на время сессии (без localStorage) */
+let reviewsStore={};
 
 const listEl=document.getElementById('list');
 const geoStatus=document.getElementById('geoStatus');
 const cityLabel=document.getElementById('cityLabel');
 const citySearch=document.getElementById('citySearch');
 const suggestionsEl=document.getElementById('suggestions');
+const geoBtn=document.getElementById('geoBtn');
 
 const STAR_SVG='<svg viewBox="0 0 24 24"><path d="M12 2.5l2.9 6.2 6.6.8-4.9 4.6 1.3 6.6-5.9-3.3-5.9 3.3 1.3-6.6-4.9-4.6 6.6-.8z"/></svg>';
 const CSTAR_SVG='<svg class="cstar" viewBox="0 0 24 24"><path fill="url(#starGrad)" d="M12 1.5l2.6 7.9 7.9 2.6-7.9 2.6L12 22.5l-2.6-7.9L1.5 12l7.9-2.6z"/></svg>';
 
+/* ============ ХЕЛПЕРЫ ============ */
 function distanceKm(a,b){
   const R=6371;
   const dLat=(b.lat-a.lat)*Math.PI/180;
@@ -412,13 +424,29 @@ function distanceKm(a,b){
   const s=Math.sin(dLat/2)**2+Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLng/2)**2;
   return R*2*Math.atan2(Math.sqrt(s),Math.sqrt(1-s));
 }
-function escapeHtml(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
-function subtypeLabel(p){const t=p.tags;return t.tourism||t.historic||t.amenity||t.shop||"";}
+function escapeHtml(s){const d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
+function fmtDist(km){
+  return km<1 ? `${Math.round(km*1000)} м` : `${km.toFixed(1)} км`;
+}
+
+/* Чистим название: убираем родовые слова, оставляя суть */
+function cleanName(name){
+  if(!name) return name;
+  const removeWords=['музей','памятник','мемориал','монумент','часовня','собор','храм','церковь','мечеть','синагога','аллея','сквер','парк','площадь','улица','станция','деревня','село','город','посёлок','район','область','республика'];
+  const words=name.split(' ');
+  const filtered=words.filter(w=>{
+    const wl=w.toLowerCase();
+    if(removeWords.some(r=>wl.includes(r)&&wl.length>3)) return false;
+    return true;
+  });
+  const cleaned=filtered.join(' ').trim();
+  return cleaned||name;
+}
 
 function buildOverpassQuery(lat,lon){
   return `[out:json][timeout:25];(
     node["tourism"~"attraction|museum|viewpoint|gallery|artwork|zoo|theme_park"](around:${RADIUS.attraction},${lat},${lon});
-    node["historic"](around:${RADIUS.attraction},${lat},${lon});
+    node["historic"~"^(?!memorial|monument|tomb|grave|war_memorial).*$"](around:${RADIUS.attraction},${lat},${lon});
     node["amenity"~"restaurant|cafe|fast_food|bar|pub|food_court"](around:${RADIUS.food},${lat},${lon});
     node["shop"~"^(supermarket|convenience|grocery|bakery|butcher|deli|greengrocer|cheese|seafood|beverages|wine|confectionery)$"](around:${RADIUS.shop},${lat},${lon});
   );out body 80;`;
@@ -430,6 +458,7 @@ function classify(tags){
   return null;
 }
 
+/* ============ ЗАГРУЗКА МЕСТ (Overpass) ============ */
 async function loadPOIs(loc,label){
   currentLocation=loc;currentCityName=label;
   cityLabel.textContent=label;
@@ -456,8 +485,12 @@ async function loadPOIs(loc,label){
       if(tags.brand && /ozon|wildberries|boxberry|cdek|сдэк|мтс|мегафон|билайн|tele2|пятёрочка/i.test(tags.brand)) return;
       const cat=classify(tags);
       if(!cat) return;
-      const p={id:el.id,cat,name:tags.name,lat:el.lat,lng:el.lon,tags,
-        addr:[tags["addr:street"],tags["addr:housenumber"]].filter(Boolean).join(", ")||"Адрес уточняется"};
+      const clean=cleanName(tags.name);
+      const p={
+        id:el.id,cat,name:clean,lat:el.lat,lng:el.lon,tags,
+        addr:[tags["addr:street"],tags["addr:housenumber"]].filter(Boolean).join(", ")||
+             (tags["addr:full"]?tags["addr:full"]:null)
+      };
       p.dist=distanceKm(loc,p);
       rawData[cat].push(p);
     });
@@ -470,6 +503,7 @@ async function loadPOIs(loc,label){
   updateCounts();render();
 }
 
+/* ============ ПОИСК ГОРОДА (Nominatim) ============ */
 citySearch.addEventListener('input',()=>{
   clearTimeout(searchDebounce);
   const q=citySearch.value.trim();
@@ -488,8 +522,8 @@ async function searchCity(q){
       suggestionsEl.classList.add('show');return;
     }
     suggestionsEl.innerHTML=results.map(r=>`
-      <div class="sugg-item" data-lat="${r.lat}" data-lon="${r.lon}" data-name="${r.display_name.split(',')[0]}">
-        ${r.display_name.split(',')[0]}<small>${r.display_name}</small>
+      <div class="sugg-item" data-lat="${r.lat}" data-lon="${r.lon}" data-name="${escapeHtml(r.display_name.split(',')[0])}">
+        ${escapeHtml(r.display_name.split(',')[0])}<small>${escapeHtml(r.display_name)}</small>
       </div>`).join('');
     suggestionsEl.classList.add('show');
     suggestionsEl.querySelectorAll('.sugg-item[data-lat]').forEach(item=>{
@@ -507,29 +541,36 @@ async function searchCity(q){
   }
 }
 
-document.getElementById('geoBtn').addEventListener('click',()=>{
-  if(!navigator.geolocation){geoStatus.textContent="Геолокация недоступна";geoStatus.classList.add('err');return;}
-  const btn=document.getElementById('geoBtn');
-  btn.disabled=true;geoStatus.classList.remove('err');
-  geoStatus.textContent="Определяем координаты…";
+/* ============ ГЕОЛОКАЦИЯ ("Где я?") ============ */
+geoBtn.addEventListener('click',()=>{
+  if(!navigator.geolocation){
+    geoStatus.textContent='Геолокация не поддерживается этим браузером';
+    geoStatus.classList.add('err');
+    return;
+  }
+  geoBtn.disabled=true;
+  geoStatus.classList.remove('err');
+  geoStatus.textContent='Определяем местоположение…';
   navigator.geolocation.getCurrentPosition(async pos=>{
     const loc={lat:pos.coords.latitude,lng:pos.coords.longitude};
-    geoStatus.textContent="Координаты получены, ищем город…";
-    let label="Моё местоположение";
+    let label='Моё местоположение';
     try{
-      const data=await(await fetch(`${NOMINATIM_URL}/reverse?format=json&lat=${loc.lat}&lon=${loc.lng}&accept-language=ru`)).json();
-      label=data.address?.city||data.address?.town||data.address?.village||data.display_name?.split(',')[0]||label;
-    }catch(e){}
+      const url=`${NOMINATIM_URL}/reverse?format=json&lat=${loc.lat}&lon=${loc.lng}&zoom=10&accept-language=ru`;
+      const data=await (await fetch(url,{headers:{"Accept":"application/json"}})).json();
+      label=data.address?.city||data.address?.town||data.address?.village||(data.display_name?data.display_name.split(',')[0]:label);
+    }catch(e){/* оставляем label по умолчанию */}
     citySearch.value=label;
-    geoStatus.textContent=`📍 ${label} · точность ${Math.round(pos.coords.accuracy)} м`;
-    btn.disabled=false;
+    geoStatus.textContent='Местоположение определено';
+    geoBtn.disabled=false;
     loadPOIs(loc,label);
   },err=>{
-    geoStatus.textContent="Не удалось получить координаты: "+err.message;
-    geoStatus.classList.add('err');btn.disabled=false;
-  },{enableHighAccuracy:true,timeout:10000});
+    geoStatus.textContent='Не удалось получить доступ к геолокации';
+    geoStatus.classList.add('err');
+    geoBtn.disabled=false;
+  },{enableHighAccuracy:true,timeout:12000});
 });
 
+/* ============ ВКЛАДКИ ============ */
 document.querySelectorAll('.tab').forEach(tab=>{
   tab.addEventListener('click',()=>{
     document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -540,255 +581,202 @@ document.querySelectorAll('.tab').forEach(tab=>{
   });
 });
 
+/* ============ СПИСОК ============ */
 function updateCounts(){
   ['attraction','food','shop'].forEach(c=>{
-    document.getElementById('cnt-'+c).textContent=loadState==='done'?rawData[c].length:'';
+    document.getElementById('cnt-'+c).textContent = loadState==='done' ? rawData[c].length : '';
   });
-}
-
-/* --- ОЦЕНКИ / ОТЗЫВЫ --- */
-function loadStore(){try{return JSON.parse(localStorage.getItem(STORE_KEY))||{};}catch(e){return {};}}
-function saveStore(s){localStorage.setItem(STORE_KEY,JSON.stringify(s));}
-function getReviews(p){return loadStore()[p.id]||[];}
-function addReview(p,stars,text){
-  const s=loadStore();
-  if(!s[p.id]) s[p.id]=[];
-  s[p.id].unshift({stars,text,date:new Date().toLocaleDateString("ru-RU")});
-  saveStore(s);
-}
-function avgRating(p){
-  const r=getReviews(p);
-  if(!r.length) return null;
-  return r.reduce((a,b)=>a+b.stars,0)/r.length;
-}
-function hasCompassStar(p){
-  if(p.cat!=="food") return false;
-  const r=getReviews(p);const avg=avgRating(p);
-  return r.length>=1 && avg>=4.5;
 }
 
 function render(){
-  document.getElementById('liveDot').classList.toggle('live',loadState==='done');
-  if(loadState==="loading"){
-    listEl.innerHTML=Array(4).fill('<div class="skeleton-card"></div>').join('');
-    document.getElementById('resultMeta').textContent="загрузка…";return;
-  }
-  if(loadState==="error"){
-    listEl.innerHTML=`<div class="error-msg">Не удалось загрузить данные о городе «${currentCityName}».<br>Проверьте соединение или попробуйте другой город.<br><button class="retry-btn" id="retryBtn">Повторить</button></div>`;
-    document.getElementById('retryBtn').addEventListener('click',()=>loadPOIs(currentLocation,currentCityName));
-    document.getElementById('resultMeta').textContent="";return;
-  }
-  const items=rawData[activeCat]||[];
-  document.getElementById('resultMeta').textContent=items.length?`найдено: ${items.length}`:"";
-  if(!items.length){
-    listEl.innerHTML=`<div class="empty-msg">В радиусе ${(RADIUS[activeCat]/1000).toFixed(1)} км от «${currentCityName}» открытых данных этой категории нет.<br>Попробуйте другой город или категорию.</div>`;
+  const resultMeta=document.getElementById('resultMeta');
+  if(loadState==='loading'){
+    listEl.innerHTML=Array(5).fill('<div class="skeleton-card"></div>').join('');
+    resultMeta.textContent='загрузка…';
     return;
   }
-  listEl.innerHTML="";
-  items.forEach((p,i)=>{
-    const card=document.createElement('div');
-    card.className='poi-card';
-    card.style.animationDelay=(i*45)+'ms';
-    const dText=p.dist<1?Math.round(p.dist*1000):p.dist.toFixed(1);
-    const dUnit=p.dist<1?"м":"км";
-    const shortDesc=p.tags.description||subtypeLabel(p)||"Нажмите, чтобы узнать подробнее";
-    const star=hasCompassStar(p)?CSTAR_SVG:"";
-    const avg=avgRating(p);
-    const catLine=(p.cat==="food"&&avg)?CAT_LABEL[p.cat]+" · ★ "+avg.toFixed(1):CAT_LABEL[p.cat];
-    card.innerHTML=`
+  if(loadState==='error'){
+    listEl.innerHTML=`<div class="error-msg">Не удалось загрузить данные.<br>Проверьте соединение с интернетом.<br><button class="retry-btn" id="retryBtn">Повторить</button></div>`;
+    document.getElementById('retryBtn').addEventListener('click',()=>loadPOIs(currentLocation,currentCityName));
+    resultMeta.textContent='';
+    return;
+  }
+  const items=rawData[activeCat]||[];
+  resultMeta.textContent=items.length?`${items.length} найдено`:'';
+  if(!items.length){
+    listEl.innerHTML=`<div class="empty-msg">Ничего не найдено рядом.<br>Попробуйте другой город или категорию.</div>`;
+    return;
+  }
+  listEl.innerHTML=items.map(p=>`
+    <div class="poi-card" data-id="${p.id}">
       <div class="poi-main">
-        <div class="poi-cat">${catLine}</div>
-        <div class="poi-name">${escapeHtml(p.name)}${star}</div>
-        <div class="poi-desc">${escapeHtml(shortDesc)}</div>
+        <div class="poi-cat">${CAT_LABEL[p.cat]}</div>
+        <div class="poi-name">${escapeHtml(p.name)}</div>
+        <div class="poi-desc">${escapeHtml(p.addr||'Адрес уточняется при открытии')}</div>
       </div>
-      <div class="poi-stub"><div class="dist-num">${dText}</div><div class="dist-unit">${dUnit}</div></div>`;
-    card.addEventListener('click',()=>openDetail(p));
-    listEl.appendChild(card);
-  });
-}
-
-function renderRateBox(p){
-  const box=document.getElementById('rateBox');
-  const reviews=getReviews(p);const avg=avgRating(p);
-  let myStars=0;
-  const award=hasCompassStar(p)?`<div class="compass-award">${CSTAR_SVG}Звезда Компаса — выбор сообщества</div>`:"";
-  const list=reviews.slice(0,3).map(r=>`
-    <div class="review-item">
-      <div class="rev-stars">${"★".repeat(r.stars)}${"☆".repeat(5-r.stars)}</div>
-      ${r.text?escapeHtml(r.text):""}
-      <div class="rev-date">${r.date}</div>
-    </div>`).join("");
-  box.innerHTML=`
-    <div class="rate-title">Оценка сообщества</div>
-    <div class="rate-avg">${avg?"★ "+avg.toFixed(1)+" · отзывов: "+reviews.length:"Пока без оценок — оцени первым"}</div>
-    ${award}
-    <div class="stars-row" id="starsRow">${[1,2,3,4,5].map(i=>`<div class="star-btn" data-v="${i}">${STAR_SVG}</div>`).join("")}</div>
-    <textarea class="review-input" id="reviewText" placeholder="Был(а) здесь? Расскажи, как место…"></textarea>
-    <button class="rate-save" id="reviewSave">Сохранить отзыв</button>
-    <div id="reviewsList">${list}</div>`;
-  const row=document.getElementById('starsRow');
-  row.querySelectorAll('.star-btn').forEach(b=>{
-    b.addEventListener('click',()=>{
-      myStars=+b.dataset.v;
-      row.querySelectorAll('.star-btn').forEach(x=>x.classList.toggle('on',+x.dataset.v<=myStars));
+      <div class="poi-stub">
+        <div class="dist-num">${p.dist<1?Math.round(p.dist*1000):p.dist.toFixed(1)}</div>
+        <div class="dist-unit">${p.dist<1?'м':'км'}</div>
+      </div>
+    </div>`).join('');
+  listEl.querySelectorAll('.poi-card').forEach(card=>{
+    card.addEventListener('click',()=>{
+      const id=parseInt(card.dataset.id,10);
+      const poi=items.find(x=>x.id===id);
+      if(poi) openDetail(poi);
     });
   });
-  document.getElementById('reviewSave').addEventListener('click',()=>{
-    const btn=document.getElementById('reviewSave');
-    if(!myStars){btn.textContent="Сначала выбери звёзды ⭐";setTimeout(()=>btn.textContent="Сохранить отзыв",1500);return;}
-    const text=document.getElementById('reviewText').value.trim();
-    addReview(p,myStars,text);
-    renderRateBox(p);render();
-  });
 }
 
-async function openDetail(p){
-  document.getElementById('detailCat').textContent=CAT_LABEL[p.cat];
-  document.getElementById('detailName').textContent=p.name;
-  document.getElementById('detailAddr').textContent=p.addr;
-  const dText=p.dist<1?`${Math.round(p.dist*1000)} м`:`${p.dist.toFixed(1)} км`;
-  document.getElementById('detailStamp').textContent=dText;
-  document.getElementById('detailDesc').textContent="Загружаем описание…";
-  document.getElementById('detailSrc').textContent="";
-  const img=document.getElementById('detailImg');
-  img.classList.add('hidden');
-  document.getElementById('detailSpinner').style.display='block';
-  document.getElementById('detail').classList.add('open');
-  renderRateBox(p);
-  const info=await getWikiInfo(p);
-  document.getElementById('detailSpinner').style.display='none';
-  if(info.image){img.src=info.image;img.classList.remove('hidden');}
-  document.getElementById('detailDesc').textContent=info.extract||fallbackDescription(p);
-  document.getElementById('detailSrc').innerHTML=info.url
-    ?`Источник: <a href="${info.url}" target="_blank">Wikipedia</a>`
-    :"Описание из данных OpenStreetMap — статья в Wikipedia не найдена.";
-}
-
-function fallbackDescription(p){
-  const t=p.tags;const kind=t.tourism||t.historic||t.amenity||t.shop;
-  return `Отдельной статьи об этом месте пока нет в Wikipedia. По данным OpenStreetMap это объект типа «${kind}»${t.cuisine?`, кухня: ${t.cuisine}`:""}. Расстояние и адрес — из открытых карт.`;
-}
-
-async function getWikiInfo(p){
-  const cacheKey=p.id;
-  if(wikiCache[cacheKey]) return wikiCache[cacheKey];
-  let info={extract:null,image:null,url:null};
+/* ============ ТОЧНЫЙ АДРЕС (Nominatim reverse) ============ */
+async function reverseGeocode(lat,lng){
+  const key=lat.toFixed(5)+','+lng.toFixed(5);
+  if(addrCache[key]!==undefined) return addrCache[key];
   try{
-    let lang=null,title=null;
-    if(p.tags.wikipedia){
-      const parts=p.tags.wikipedia.split(':');
-      if(parts.length===2){lang=parts[0];title=parts[1];}
-      else{lang="ru";title=p.tags.wikipedia;}
-    }
-    if(!title&&p.tags.wikidata){
-      const wd=await fetchWikidata(p.tags.wikidata);
-      if(wd){
-        if(wd.ruTitle){lang="ru";title=wd.ruTitle;}
-        else if(wd.enTitle){lang="en";title=wd.enTitle;}
-        if(wd.description) info.extract=wd.description;
-      }
-    }
-    let article=null;
-    if(title) article=await fetchSummary(lang,title);
-    if(!article||!article.extract){
-      const exact=await fetchSummary("ru",p.name);
-      if(exact&&exact.extract) article=exact;
-    }
-    if(article&&article.extract){
-      info.extract=article.extract;
-      info.image=article.thumbnail?.source||article.originalimage?.source||null;
-      info.url=article.content_urls?.desktop?.page||null;
-    }
-    if(!info.extract){
-      const found=await searchWikiTitle("ru",p.name+" "+currentCityName);
-      if(found&&titleMatches(p.name,found)){
-        const s=await fetchSummary("ru",found);
-        if(s&&s.extract){
-          info.extract=s.extract;
-          info.image=s.thumbnail?.source||s.originalimage?.source||null;
-          info.url=s.content_urls?.desktop?.page||null;
-        }
-      }
-    }
-  }catch(e){}
-  if(!info.image) info.image=await findPhoto(p);
-  wikiCache[cacheKey]=info;
-  return info;
-}
-
-async function fetchWikidata(qid){
-  try{
-    const url=`https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&origin=*&ids=${qid}&props=descriptions|sitelinks&languages=ru|en`;
-    const data=await(await fetch(url)).json();
-    const e=data.entities&&data.entities[qid];
-    if(!e) return null;
-    return {
-      description:(e.descriptions&&(e.descriptions.ru?.value||e.descriptions.en?.value))||null,
-      ruTitle:e.sitelinks?.ruwiki?.title||null,
-      enTitle:e.sitelinks?.enwiki?.title||null
-    };
-  }catch(e){return null;}
-}
-
-function titleMatches(name,title){
-  const stop=["памятник","монумент","мемориал","могила","братская","советских","воинов","солдат","героев","имени","улица","площадь","аллея","сквер","парк","музей","собор","церковь","храм","часовня","мост","станция","деревня","село","город","посёлок","район","область","республика"];
-  const norm=s=>(s||"").toLowerCase().replace(/ё/g,"е").replace(/[^a-zа-я0-9\s]/g," ").replace(/\s+/g," ").trim();
-  const t=norm(title);
-  const words=norm(name).split(" ").filter(w=>w.length>=5&&!stop.includes(w));
-  if(!words.length) return false;
-  const stem=w=>w.slice(0,w.length>7?6:5);
-  return words.some(w=>t.includes(stem(w)));
-}
-
-async function findPhoto(p){
-  if(p.tags.wikidata){
-    try{
-      const url=`https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&origin=*&ids=${p.tags.wikidata}&props=claims`;
-      const data=await(await fetch(url)).json();
-      const claims=data.entities&&data.entities[p.tags.wikidata]&&data.entities[p.tags.wikidata].claims;
-      const file=claims&&claims.P18&&claims.P18[0]&&claims.P18[0].mainsnak&&claims.P18[0].mainsnak.datavalue&&claims.P18[0].mainsnak.datavalue.value;
-      if(file) return `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(file)}?width=1000`;
-    }catch(e){}
+    const url=`${NOMINATIM_URL}/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1&accept-language=ru`;
+    const data=await (await fetch(url,{headers:{"Accept":"application/json"}})).json();
+    const a=data.address||{};
+    const street=[a.road,a.house_number].filter(Boolean).join(', ');
+    const locality=a.city||a.town||a.village||a.suburb;
+    const parts=[street,locality].filter(Boolean);
+    const result=parts.length?parts.join(', '):(data.display_name?data.display_name.split(',').slice(0,3).join(', '):null);
+    addrCache[key]=result;
+    return result;
+  }catch(e){
+    addrCache[key]=null;
+    return null;
   }
-  try{
-    const q=encodeURIComponent(p.name+" "+currentCityName);
-    const url=`https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&generator=search&gsrsearch=${q}&gsrnamespace=6&gsrlimit=5&prop=imageinfo&iiprop=url|mime&iiurlwidth=1000`;
-    const data=await(await fetch(url)).json();
-    const pages=data.query&&data.query.pages;
-    if(pages){
-      const arr=Object.values(pages).sort((a,b)=>(a.index||0)-(b.index||0));
-      for(const pg of arr){
-        const ii=pg.imageinfo&&pg.imageinfo[0];
-        if(ii&&ii.mime&&/image\/(jpeg|png|webp)/.test(ii.mime)&&titleMatches(p.name,pg.title)){
-          return ii.thumburl||ii.url;
-        }
-      }
-    }
-  }catch(e){}
-  return null;
 }
 
-async function fetchSummary(lang,title){
+/* ============ ФОТО + ОПИСАНИЕ (Wikipedia) ============ */
+async function fetchWikiInfo(poi){
+  const cacheKey=poi.name+'|'+currentCityName;
+  if(wikiCache[cacheKey]) return wikiCache[cacheKey];
   try{
-    const resp=await fetch(`https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
-    if(!resp.ok) return null;
-    const data=await resp.json();
-    if(data.type==="disambiguation") return null;
-    return data;
-  }catch(e){return null;}
+    const searchUrl=`${WIKI_API_URL}?action=query&list=search&srsearch=${encodeURIComponent(poi.name+' '+currentCityName)}&format=json&origin=*&srlimit=1`;
+    const searchData=await (await fetch(searchUrl)).json();
+    const hit=searchData?.query?.search?.[0];
+    if(!hit) throw new Error('no wiki match');
+    const title=hit.title;
+    const summary=await (await fetch(WIKI_SUMMARY_URL+encodeURIComponent(title))).json();
+    const result={
+      desc: summary.extract || null,
+      image: (summary.thumbnail && summary.thumbnail.source) || (summary.originalimage && summary.originalimage.source) || null,
+      wikiUrl: summary.content_urls?.desktop?.page || null
+    };
+    wikiCache[cacheKey]=result;
+    return result;
+  }catch(e){
+    const fallback={desc:null,image:null,wikiUrl:null};
+    wikiCache[cacheKey]=fallback;
+    return fallback;
+  }
 }
-async function searchWikiTitle(lang,name){
-  try{
-    const url=`https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(name)}&format=json&origin=*&srlimit=1`;
-    const data=await(await fetch(url)).json();
-    return data.query?.search?.[0]?.title||null;
-  }catch(e){return null;}
+
+/* ============ ДЕТАЛЬНАЯ КАРТОЧКА ============ */
+async function openDetail(poi){
+  const detail=document.getElementById('detail');
+  detail.classList.add('open');
+  document.body.style.overflow='hidden';
+
+  document.getElementById('detailCat').textContent=CAT_LABEL[poi.cat];
+  document.getElementById('detailName').textContent=poi.name;
+  document.getElementById('detailStamp').textContent=fmtDist(poi.dist);
+
+  /* Адрес показываем сразу: то, что уже есть из OSM, пока идёт точное уточнение */
+  const addrEl=document.getElementById('detailAddr');
+  addrEl.textContent = poi.addr ? poi.addr : 'Уточняем точный адрес…';
+
+  const img=document.getElementById('detailImg');
+  const spinner=document.getElementById('detailSpinner');
+  img.classList.add('hidden');img.src='';
+  spinner.style.display='flex';
+
+  const descEl=document.getElementById('detailDesc');
+  descEl.textContent='Загружаем описание…';
+
+  const srcEl=document.getElementById('detailSrc');
+  srcEl.innerHTML='';
+
+  renderRateBox(poi);
+
+  /* Уточняем точный адрес независимо от того, был ли он у OSM-тега */
+  reverseGeocode(poi.lat,poi.lng).then(addr=>{
+    if(addr) addrEl.textContent=addr;
+    else if(!poi.addr) addrEl.textContent='Точный адрес не найден';
+  });
+
+  /* Подгружаем фото и описание из Wikipedia */
+  fetchWikiInfo(poi).then(info=>{
+    if(info.image){
+      img.onload=()=>{spinner.style.display='none';img.classList.remove('hidden');};
+      img.onerror=()=>{spinner.style.display='none';};
+      img.src=info.image;
+    }else{
+      spinner.style.display='none';
+    }
+    descEl.textContent = info.desc
+      ? info.desc
+      : `Подробное описание пока не найдено в Wikipedia. Это место категории «${CAT_LABEL[poi.cat]}», находится в ${fmtDist(poi.dist)} от выбранной точки.`;
+    srcEl.innerHTML = info.wikiUrl
+      ? `Источник описания и фото: <a href="${info.wikiUrl}" target="_blank">Wikipedia</a>`
+      : `Описание и фото в Wikipedia не найдены`;
+  });
 }
 
 document.getElementById('closeDetail').addEventListener('click',()=>{
   document.getElementById('detail').classList.remove('open');
+  document.body.style.overflow='';
 });
 
+/* ============ ОЦЕНКИ / ОТЗЫВЫ (хранятся в памяти сессии) ============ */
+function renderRateBox(poi){
+  const data=reviewsStore[poi.id]||{reviews:[]};
+  const avg=data.reviews.length ? (data.reviews.reduce((s,r)=>s+r.stars,0)/data.reviews.length).toFixed(1) : null;
+
+  const rateBox=document.getElementById('rateBox');
+  rateBox.innerHTML=`
+    <div class="rate-title">Оценки</div>
+    <div class="rate-avg">${avg?`Средняя оценка: ${avg} · ${data.reviews.length} ${data.reviews.length===1?'отзыв':'отзыва(ов)'}`:'Пока нет оценок — станьте первым'}</div>
+    <div class="stars-row" id="starsRow">${[1,2,3,4,5].map(i=>`<span class="star-btn" data-val="${i}">${STAR_SVG}</span>`).join('')}</div>
+    <textarea class="review-input" id="reviewText" placeholder="Поделитесь впечатлением (необязательно)…"></textarea>
+    <button class="rate-save" id="rateSaveBtn">Сохранить оценку</button>
+    <div id="reviewsList">
+      ${data.reviews.slice().reverse().map(r=>`
+        <div class="review-item">
+          <div class="rev-stars">${'★'.repeat(r.stars)}${'☆'.repeat(5-r.stars)}</div>
+          ${escapeHtml(r.text||'')}
+          <div class="rev-date">${r.date}</div>
+        </div>`).join('')}
+    </div>
+  `;
+
+  let selected=0;
+  const starEls=rateBox.querySelectorAll('#starsRow .star-btn');
+  starEls.forEach(s=>{
+    s.addEventListener('click',()=>{
+      selected=parseInt(s.dataset.val,10);
+      starEls.forEach(x=>x.classList.toggle('on',parseInt(x.dataset.val,10)<=selected));
+    });
+  });
+  document.getElementById('rateSaveBtn').addEventListener('click',()=>{
+    if(!selected){
+      alert('Сначала выберите количество звёзд');
+      return;
+    }
+    const text=document.getElementById('reviewText').value.trim();
+    if(!reviewsStore[poi.id]) reviewsStore[poi.id]={reviews:[]};
+    reviewsStore[poi.id].reviews.push({
+      stars:selected,
+      text,
+      date:new Date().toLocaleDateString('ru-RU')
+    });
+    renderRateBox(poi);
+  });
+}
+
+/* ============ СТАРТ ============ */
+document.getElementById('radiusText').textContent=`радиус поиска: ${(RADIUS.attraction/1000).toFixed(1)} км`;
 loadPOIs(currentLocation,currentCityName);
 </script>
 </body>
